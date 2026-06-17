@@ -1,0 +1,9 @@
+{
+  "revision": "v1-seaweedfs-2026-06-15",
+  "roots": ["governance", "polaris", "trino"],
+  "metadata": {
+    "author": "ericson",
+    "environment": "lab",
+    "generated_at": "2026-06-15T15:00:00Z"
+  }
+}
