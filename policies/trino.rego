@@ -15,6 +15,24 @@ allow if {
 }
 
 # ------------------------------------------------------------------------------
+# ANALISTA: SHOW SCHEMAS (listar namespaces permitidos)
+# ------------------------------------------------------------------------------
+allow if {
+    input.user.role == "analista"
+    input.action == "SHOW_SCHEMAS"
+    # Retorna true, mas o Trino deve filtrar os schemas
+}
+
+# ------------------------------------------------------------------------------
+# ANALISTA: SHOW TABLES em namespaces permitidos
+# ------------------------------------------------------------------------------
+allow if {
+    input.user.role == "analista"
+    input.action == "SHOW_TABLES"
+    input.namespace != "financeiro"
+}
+
+# ------------------------------------------------------------------------------
 # ANALISTA: SELECT em qualquer namespace, exceto "financeiro"
 # ------------------------------------------------------------------------------
 allow if {
