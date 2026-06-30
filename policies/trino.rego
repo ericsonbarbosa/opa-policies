@@ -1,5 +1,9 @@
 package trino
 
+import future.keywords.in
+import future.keywords.if
+import future.keywords.contains
+
 # ==============================================================================
 # POLÍTICAS DE GOVERNANÇA PARA TRINO
 # Single Source of Truth — OPA decide quem pode fazer o quê
@@ -11,94 +15,56 @@ default allow := false
 # ADMIN: Acesso total (pode fazer qualquer operação)
 # ------------------------------------------------------------------------------
 allow if {
-    input.user.role == "admin"
+    input.context.identity.user == "admin"
 }
 
 # ------------------------------------------------------------------------------
-# ANALISTA: SHOW SCHEMAS (listar namespaces permitidos)
+# ANALISTA (rodrigo): SELECT em qualquer schema, exceto "financeiro"
 # ------------------------------------------------------------------------------
 allow if {
-    input.user.role == "analista"
-    input.action == "SHOW_SCHEMAS"
-    # Retorna true, mas o Trino deve filtrar os schemas
+    input.context.identity.user == "rodrigo"
+    input.action.operation in ["SelectFromColumns", "FilterTables"]
+    input.action.resource.table.schemaName != "financeiro"
 }
 
 # ------------------------------------------------------------------------------
-# ANALISTA: SHOW TABLES em namespaces permitidos
+# ANALISTA (rodrigo): SELECT em "financeiro" apenas para tabelas públicas
 # ------------------------------------------------------------------------------
 allow if {
-    input.user.role == "analista"
-    input.action == "SHOW_TABLES"
-    input.namespace != "financeiro"
+    input.context.identity.user == "rodrigo"
+    input.action.operation == "SelectFromColumns"
+    input.action.resource.table.schemaName == "financeiro"
+    input.action.resource.table.tableName == "vendas_publicas"
 }
 
 # ------------------------------------------------------------------------------
-# ANALISTA: SELECT em qualquer namespace, exceto "financeiro"
+# ANALISTA (rodrigo): INSERT/CREATE apenas em "sandbox"
 # ------------------------------------------------------------------------------
 allow if {
-    input.user.role == "analista"
-    input.action == "SELECT"
-    input.namespace != "financeiro"
+    input.context.identity.user == "rodrigo"
+    input.action.operation in ["InsertIntoTable", "CreateTable"]
+    input.action.resource.table.schemaName == "sandbox"
 }
 
 # ------------------------------------------------------------------------------
-# ANALISTA: SELECT em "financeiro" apenas para tabelas específicas
+# ANALISTA (rodrigo): Listar schemas (necessário para SHOW SCHEMAS)
 # ------------------------------------------------------------------------------
 allow if {
-    input.user.role == "analista"
-    input.action == "SELECT"
-    input.namespace == "financeiro"
-    input.table == "vendas_publicas"
+    input.context.identity.user == "rodrigo"
+    input.action.operation == "FilterSchemas"
 }
 
 # ------------------------------------------------------------------------------
-# ANALISTA: INSERT/UPDATE/DELETE apenas em namespace "sandbox"
-# ------------------------------------------------------------------------------
-allow if {
-    input.user.role == "analista"
-    input.action in ["INSERT", "UPDATE", "DELETE"]
-    input.namespace == "sandbox"
-}
-
-# ------------------------------------------------------------------------------
-# ANALISTA: CREATE/DROP apenas em namespace "sandbox"
-# ------------------------------------------------------------------------------
-allow if {
-    input.user.role == "analista"
-    input.action in ["CREATE", "DROP"]
-    input.namespace == "sandbox"
-}
-
-# ------------------------------------------------------------------------------
-# DEV: Acesso total em "sandbox" e "dev"
-# ------------------------------------------------------------------------------
-allow if {
-    input.user.role == "dev"
-    input.namespace in ["sandbox", "dev"]
-}
-
-# ------------------------------------------------------------------------------
-# DEV: SELECT em outros namespaces (apenas leitura)
-# ------------------------------------------------------------------------------
-allow if {
-    input.user.role == "dev"
-    input.action == "SELECT"
-    input.namespace not in ["financeiro", "comercial"]
-}
-
-# ------------------------------------------------------------------------------
-# Mensagens de negação (para debug e auditoria)
+# Mensagens de negação (para auditoria)
 # ------------------------------------------------------------------------------
 deny contains msg if {
     not allow
     msg := sprintf(
-        "Acesso negado: user=%s role=%s action=%s namespace=%s table=%s",
+        "Acesso negado: user=%s operation=%s resource=%v",
         [
-            input.user.name,
-            input.user.role,
-            input.action,
-            input.namespace,
-            input.table
+            input.context.identity.user,
+            input.action.operation,
+            input.action.resource
         ]
     )
 }
