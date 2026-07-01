@@ -5,30 +5,50 @@ import future.keywords.if
 import future.keywords.contains
 
 # ==============================================================================
-# POLÍTICAS DE GOVERNANÇA PARA TRINO
+# POLÍTICA DE GOVERNANÇA PARA TRINO (Plugin Oficial)
 # Single Source of Truth — OPA decide quem pode fazer o quê
 # ==============================================================================
 
 default allow := false
 
 # ------------------------------------------------------------------------------
-# ADMIN: Acesso total (pode fazer qualquer operação)
+# ADMIN: Acesso total irrestrito
 # ------------------------------------------------------------------------------
 allow if {
     input.context.identity.user == "admin"
 }
 
 # ------------------------------------------------------------------------------
-# ANALISTA (rodrigo): SELECT em qualquer schema, exceto "financeiro"
+# RODRIGO (Analista): Operações de listagem
+# SHOW SCHEMAS, SHOW TABLES, USE schema
 # ------------------------------------------------------------------------------
 allow if {
     input.context.identity.user == "rodrigo"
-    input.action.operation in ["SelectFromColumns", "FilterTables"]
+    input.action.operation in [
+        "FilterSchemas", 
+        "FilterTables", 
+        "FilterColumns",
+        "ShowSchemas",
+        "ShowTables",
+        "ShowColumns",
+        "UseSchema"
+    ]
+    # Permite listar em qualquer schema EXCETO financeiro
+    object.get(input.action.resource, "schema", {}).schemaName != "financeiro"
+    object.get(input.action.resource.table, "schemaName", "") != "financeiro"
+}
+
+# ------------------------------------------------------------------------------
+# RODRIGO (Analista): SELECT em qualquer schema, EXCETO financeiro
+# ------------------------------------------------------------------------------
+allow if {
+    input.context.identity.user == "rodrigo"
+    input.action.operation == "SelectFromColumns"
     input.action.resource.table.schemaName != "financeiro"
 }
 
 # ------------------------------------------------------------------------------
-# ANALISTA (rodrigo): SELECT em "financeiro" apenas para tabelas públicas
+# RODRIGO (Analista): SELECT em financeiro apenas para tabela pública específica
 # ------------------------------------------------------------------------------
 allow if {
     input.context.identity.user == "rodrigo"
@@ -38,7 +58,7 @@ allow if {
 }
 
 # ------------------------------------------------------------------------------
-# ANALISTA (rodrigo): INSERT/CREATE apenas em "sandbox"
+# RODRIGO (Analista): INSERT e CREATE apenas em sandbox
 # ------------------------------------------------------------------------------
 allow if {
     input.context.identity.user == "rodrigo"
@@ -47,24 +67,27 @@ allow if {
 }
 
 # ------------------------------------------------------------------------------
-# ANALISTA (rodrigo): Listar schemas (necessário para SHOW SCHEMAS)
+# RODRIGO (Analista): CREATE TABLE em api_lab (leitura + criação permitida)
 # ------------------------------------------------------------------------------
 allow if {
     input.context.identity.user == "rodrigo"
-    input.action.operation == "FilterSchemas"
+    input.action.operation in ["CreateTable", "InsertIntoTable"]
+    input.action.resource.table.schemaName == "api_lab"
 }
 
 # ------------------------------------------------------------------------------
-# Mensagens de negação (para auditoria)
+# Mensagens de auditoria (para debug nos logs do OPA)
 # ------------------------------------------------------------------------------
 deny contains msg if {
     not allow
     msg := sprintf(
-        "Acesso negado: user=%s operation=%s resource=%v",
+        "OPA DENIED: user=%s op=%s catalog=%s schema=%s table=%s",
         [
             input.context.identity.user,
             input.action.operation,
-            input.action.resource
+            object.get(input.action.resource.table, "catalogName", "N/A"),
+            object.get(input.action.resource.table, "schemaName", "N/A"),
+            object.get(input.action.resource.table, "tableName", "N/A")
         ]
     )
 }
