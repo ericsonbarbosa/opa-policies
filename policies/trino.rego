@@ -31,6 +31,16 @@ allow if {
 }
 
 # ------------------------------------------------------------------------------
+# RODRIGO: AccessCatalog — necessário para conectar ao catálogo
+# (diferente de CheckCanAccessCatalog — o Trino chama as duas)
+# ------------------------------------------------------------------------------
+allow if {
+    input.context.identity.user == "rodrigo"
+    input.action.operation == "AccessCatalog"
+    input.action.resource.catalog.catalogName in ["iceberg", "system", "memory", "tpch"]
+}
+
+# ------------------------------------------------------------------------------
 # RODRIGO: FilterSchemas — sem restrição de schema (é uma operação de listagem,
 # o Trino filtra o resultado; bloquear aqui impede SHOW SCHEMAS inteiro)
 # ------------------------------------------------------------------------------
