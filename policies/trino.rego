@@ -6,85 +6,125 @@ import future.keywords.contains
 
 # ==============================================================================
 # POLÍTICA DE GOVERNANÇA PARA TRINO (Plugin Oficial)
-# Single Source of Truth — OPA decide quem pode fazer o quê
 # ==============================================================================
 
 default allow := false
 
 # ------------------------------------------------------------------------------
-# ADMIN: Acesso total irrestrito
+# ADMIN: acesso total
 # ------------------------------------------------------------------------------
 allow if {
     input.context.identity.user == "admin"
 }
 
 # ------------------------------------------------------------------------------
-# RODRIGO (Analista): Acesso aos catálogos (PRÉ-REQUISITO para qualquer operação)
-# Sem isso, Trino bloqueia antes mesmo de consultar schemas/tabelas
+# RODRIGO: permissão para iniciar/executar queries
+# ------------------------------------------------------------------------------
+allow if {
+    input.context.identity.user == "rodrigo"
+    input.action.operation in [
+        "ExecuteQuery",
+        "ViewQuery",
+        "FilterCatalogs"
+    ]
+}
+
+# ------------------------------------------------------------------------------
+# RODRIGO: acesso aos catálogos
 # ------------------------------------------------------------------------------
 allow if {
     input.context.identity.user == "rodrigo"
     input.action.operation == "CheckCanAccessCatalog"
-    input.action.resource.catalog.catalogName in ["iceberg", "system", "memory", "tpch"]
+    input.action.resource.catalog.catalogName in [
+        "iceberg",
+        "system",
+        "memory",
+        "tpch"
+    ]
 }
 
 # ------------------------------------------------------------------------------
-# RODRIGO (Analista): Operações de listagem e metadados
-# SHOW SCHEMAS, SHOW TABLES, USE schema
+# RODRIGO: operações de metadata
 # ------------------------------------------------------------------------------
-allow if {
-    input.context.identity.user == "rodrigo"
-    input.action.operation == "FilterSchemas"
-}
-
 allow if {
     input.context.identity.user == "rodrigo"
     input.action.operation in [
-        "FilterTables", 
+        "FilterSchemas",
+        "FilterTables",
         "FilterColumns",
         "ShowSchemas",
         "ShowTables",
         "ShowColumns",
         "UseSchema"
     ]
-    schema_name := object.get(input.action.resource, "schema", {}).schemaName
-    schema_name != "financeiro"
-    
-    table_schema := object.get(input.action.resource.table, "schemaName", "")
-    table_schema != "financeiro"
+
+    not is_financeiro()
 }
 
 # ------------------------------------------------------------------------------
-# RODRIGO (Analista): SELECT em qualquer schema, EXCETO financeiro
+# RODRIGO: SELECT liberado exceto financeiro
 # ------------------------------------------------------------------------------
 allow if {
     input.context.identity.user == "rodrigo"
     input.action.operation == "SelectFromColumns"
-    input.action.resource.table.schemaName != "financeiro"
+
+    schema := object.get(
+        input.action.resource.table,
+        "schemaName",
+        ""
+    )
+
+    schema != "financeiro"
 }
 
 # ------------------------------------------------------------------------------
-# RODRIGO (Analista): INSERT e CREATE TABLE apenas em sandbox e api_lab
+# RODRIGO: INSERT e CREATE apenas em sandbox e api_lab
 # ------------------------------------------------------------------------------
 allow if {
     input.context.identity.user == "rodrigo"
-    input.action.operation in ["InsertIntoTable", "CreateTable"]
-    input.action.resource.table.schemaName in ["sandbox", "api_lab"]
+
+    input.action.operation in [
+        "InsertIntoTable",
+        "CreateTable"
+    ]
+
+    input.action.resource.table.schemaName in [
+        "sandbox",
+        "api_lab"
+    ]
 }
 
 # ------------------------------------------------------------------------------
-# Mensagens de auditoria (para debug nos logs do OPA)
+# Função auxiliar
+# ------------------------------------------------------------------------------
+is_financeiro if {
+    object.get(
+        object.get(input.action.resource, "schema", {}),
+        "schemaName",
+        ""
+    ) == "financeiro"
+}
+
+is_financeiro if {
+    object.get(
+        object.get(input.action.resource, "table", {}),
+        "schemaName",
+        ""
+    ) == "financeiro"
+}
+
+# ------------------------------------------------------------------------------
+# DEBUG
 # ------------------------------------------------------------------------------
 deny contains msg if {
     not allow
+
     msg := sprintf(
-        "OPA DENIED: user=%s op=%s catalog=%s schema=%s table=%s",
+        "OPA DENIED user=%v operation=%v resource=%v",
         [
             input.context.identity.user,
             input.action.operation,
-            object.get(input.action.resource.table, "catalogName", "N/A"),
-            object.get(input.action.resource.table, "schemaName", "N/A"),
-            object.get(input.action.resource.table, "tableName", "N/A")
+            input.action.resource
         ]
     )
 }
