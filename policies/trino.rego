@@ -19,7 +19,7 @@ allow if {
 }
 
 # ------------------------------------------------------------------------------
-# RODRIGO (Analista): Operações de listagem
+# RODRIGO (Analista): Operações de listagem e metadados
 # SHOW SCHEMAS, SHOW TABLES, USE schema
 # ------------------------------------------------------------------------------
 allow if {
@@ -33,9 +33,18 @@ allow if {
         "ShowColumns",
         "UseSchema"
     ]
-    # Permite listar em qualquer schema EXCETO financeiro
-    object.get(input.action.resource, "schema", {}).schemaName != "financeiro"
-    object.get(input.action.resource.table, "schemaName", "") != "financeiro"
+    # Permite em qualquer schema EXCETO financeiro
+    schema_name := object.get(input.action.resource, "schema", {}).schemaName
+    schema_name != "financeiro"
+    
+    table_schema := object.get(input.action.resource.table, "schemaName", "")
+    table_schema != "financeiro"
+}
+
+# Caso especial: FilterSchemas não tem resource.schemaName, então sempre permite
+allow if {
+    input.context.identity.user == "rodrigo"
+    input.action.operation == "FilterSchemas"
 }
 
 # ------------------------------------------------------------------------------
@@ -48,31 +57,12 @@ allow if {
 }
 
 # ------------------------------------------------------------------------------
-# RODRIGO (Analista): SELECT em financeiro apenas para tabela pública específica
-# ------------------------------------------------------------------------------
-allow if {
-    input.context.identity.user == "rodrigo"
-    input.action.operation == "SelectFromColumns"
-    input.action.resource.table.schemaName == "financeiro"
-    input.action.resource.table.tableName == "vendas_publicas"
-}
-
-# ------------------------------------------------------------------------------
-# RODRIGO (Analista): INSERT e CREATE apenas em sandbox
+# RODRIGO (Analista): INSERT e CREATE TABLE apenas em sandbox e api_lab
 # ------------------------------------------------------------------------------
 allow if {
     input.context.identity.user == "rodrigo"
     input.action.operation in ["InsertIntoTable", "CreateTable"]
-    input.action.resource.table.schemaName == "sandbox"
-}
-
-# ------------------------------------------------------------------------------
-# RODRIGO (Analista): CREATE TABLE em api_lab (leitura + criação permitida)
-# ------------------------------------------------------------------------------
-allow if {
-    input.context.identity.user == "rodrigo"
-    input.action.operation in ["CreateTable", "InsertIntoTable"]
-    input.action.resource.table.schemaName == "api_lab"
+    input.action.resource.table.schemaName in ["sandbox", "api_lab"]
 }
 
 # ------------------------------------------------------------------------------
