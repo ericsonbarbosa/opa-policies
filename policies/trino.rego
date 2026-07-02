@@ -4,99 +4,97 @@ import future.keywords.in
 import future.keywords.if
 import future.keywords.contains
 
+# ==============================================================================
+# ESTRATÉGIA HÍBRIDA: Default Deny + User Roles + Deny List
+# Seguro por padrão, flexível para usuários autorizados
+# ==============================================================================
+
 default allow := false
+
+# ------------------------------------------------------------------------------
+# ROLES (Papéis de Acesso)
+# Centraliza quem tem acesso ao sistema
+# ------------------------------------------------------------------------------
+user_roles := {
+    "admin": ["admin"],
+    "rodrigo": ["analista"],
+    # Adicione novos usuários aqui explicitamente:
+    # "flavio": ["analista"],
+    # "maria": ["gerente"],
+}
+
+# Função auxiliar para verificar se usuário tem um role
+has_role(user, role) if {
+    role in user_roles[user]
+}
 
 # ------------------------------------------------------------------------------
 # ADMIN: Acesso total irrestrito
 # ------------------------------------------------------------------------------
 allow if {
-    input.context.identity.user == "admin"
+    has_role(input.context.identity.user, "admin")
 }
 
 # ------------------------------------------------------------------------------
-# RODRIGO: ExecuteQuery — obrigatório para qualquer query rodar
+# ANALISTA: Allow by default para TODAS as operações EXCETO as explicitamente negadas
+# Isso resolve o problema de operações desconhecidas do Trino
 # ------------------------------------------------------------------------------
 allow if {
-    input.context.identity.user == "rodrigo"
-    input.action.operation == "ExecuteQuery"
+    has_role(input.context.identity.user, "analista")
+    not deny_financial_operations
 }
 
 # ------------------------------------------------------------------------------
-# RODRIGO: Acesso aos catálogos
+# DENY LIST: Operações proibidas para analistas no schema financeiro
 # ------------------------------------------------------------------------------
-allow if {
-    input.context.identity.user == "rodrigo"
-    input.action.operation == "CheckCanAccessCatalog"
-    input.action.resource.catalog.catalogName in ["iceberg", "system", "memory", "tpch"]
+deny_financial_operations if {
+    has_role(input.context.identity.user, "analista")
+    
+    # Bloquear SELECT, INSERT, UPDATE, DELETE em financeiro
+    input.action.operation in [
+        "SelectFromColumns",
+        "InsertIntoTable",
+        "DeleteFromTable",
+        "UpdateTable"
+    ]
+    input.action.resource.table.schemaName == "financeiro"
 }
 
-# ------------------------------------------------------------------------------
-# RODRIGO: AccessCatalog — necessário para conectar ao catálogo
-# (diferente de CheckCanAccessCatalog — o Trino chama as duas)
-# ------------------------------------------------------------------------------
-allow if {
-    input.context.identity.user == "rodrigo"
-    input.action.operation == "AccessCatalog"
-    input.action.resource.catalog.catalogName in ["iceberg", "system", "memory", "tpch"]
+deny_financial_operations if {
+    has_role(input.context.identity.user, "analista")
+    
+    # Bloquear CREATE, DROP, RENAME em financeiro
+    input.action.operation in [
+        "CreateTable",
+        "DropTable",
+        "RenameTable",
+        "CreateSchema",
+        "DropSchema"
+    ]
+    # Verificar schema em diferentes estruturas de resource
+    schema_name := object.get(input.action.resource.table, "schemaName",
+                   object.get(input.action.resource.schema, "schemaName", ""))
+    schema_name == "financeiro"
 }
 
-# ------------------------------------------------------------------------------
-# RODRIGO: FilterSchemas — sem restrição de schema (é uma operação de listagem,
-# o Trino filtra o resultado; bloquear aqui impede SHOW SCHEMAS inteiro)
-# ------------------------------------------------------------------------------
-allow if {
-    input.context.identity.user == "rodrigo"
-    input.action.operation in ["FilterSchemas", "ShowSchemas"]
-}
-
-# ------------------------------------------------------------------------------
-# RODRIGO: Metadados de tabelas/colunas — apenas schemas não-financeiros
-# Regras separadas por tipo de recurso para evitar undefined em campos ausentes
-# ------------------------------------------------------------------------------
-allow if {
-    input.context.identity.user == "rodrigo"
-    input.action.operation in ["FilterTables", "ShowTables", "FilterColumns", "ShowColumns"]
-    input.action.resource.table.schemaName != "financeiro"
-}
-
-# ------------------------------------------------------------------------------
-# RODRIGO: USE schema — apenas schemas não-financeiros
-# ------------------------------------------------------------------------------
-allow if {
-    input.context.identity.user == "rodrigo"
+deny_financial_operations if {
+    has_role(input.context.identity.user, "analista")
+    
+    # Bloquear USE schema financeiro
     input.action.operation == "UseSchema"
-    input.action.resource.schema.schemaName != "financeiro"
+    input.action.resource.schema.schemaName == "financeiro"
 }
 
 # ------------------------------------------------------------------------------
-# RODRIGO: SELECT — qualquer schema exceto financeiro
-# ------------------------------------------------------------------------------
-allow if {
-    input.context.identity.user == "rodrigo"
-    input.action.operation == "SelectFromColumns"
-    input.action.resource.table.schemaName != "financeiro"
-}
-
-# ------------------------------------------------------------------------------
-# RODRIGO: INSERT e CREATE TABLE apenas em sandbox e api_lab
-# ------------------------------------------------------------------------------
-allow if {
-    input.context.identity.user == "rodrigo"
-    input.action.operation in ["InsertIntoTable", "CreateTable"]
-    input.action.resource.table.schemaName in ["sandbox", "api_lab"]
-}
-
-# ------------------------------------------------------------------------------
-# Auditoria
+# AUDITORIA: Loga todas as negações
 # ------------------------------------------------------------------------------
 deny contains msg if {
     not allow
     msg := sprintf(
-        "OPA DENIED: user=%s op=%s catalog=%s schema=%s table=%s",
+        "OPA DENIED: user=%s op=%s schema=%s table=%s",
         [
             input.context.identity.user,
             input.action.operation,
-            object.get(input.action.resource.table, "catalogName", "N/A"),
             object.get(input.action.resource.table, "schemaName", "N/A"),
             object.get(input.action.resource.table, "tableName", "N/A")
         ]
