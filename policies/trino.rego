@@ -5,50 +5,45 @@ import future.keywords.if
 import future.keywords.contains
 
 # ==============================================================================
-# POLÍTICA DE GOVERNANÇA PARA TRINO (Plugin Oficial)
+# ESTRATÉGIA HÍBRIDA: Default Deny + Allow List + Deny List
+# Seguro por padrão, flexível para usuários autorizados
 # ==============================================================================
 
 default allow := false
 
 # ------------------------------------------------------------------------------
-# ADMIN: acesso total
+# ROLES (Papéis de Acesso)
+# Centraliza quem tem acesso ao sistema
 # ------------------------------------------------------------------------------
-allow if {
-    input.context.identity.user == "admin"
+user_roles := {
+    "admin": ["admin"],
+    "rodrigo": ["analista"],
+    # Adicione novos usuários aqui explicitamente:
+    # "flavio": ["analista"],
+    # "maria": ["gerente"],
+}
+
+# Função auxiliar para verificar se usuário tem um role
+has_role(user, role) if {
+    role in user_roles[user]
 }
 
 # ------------------------------------------------------------------------------
-# RODRIGO: permissão para iniciar/executar queries
+# ADMIN: Acesso total irrestrito
 # ------------------------------------------------------------------------------
 allow if {
-    input.context.identity.user == "rodrigo"
+    has_role(input.context.identity.user, "admin")
+}
+
+# ------------------------------------------------------------------------------
+# ANALISTA: Operações de infraestrutura (necessárias para queries funcionarem)
+# ------------------------------------------------------------------------------
+allow if {
+    has_role(input.context.identity.user, "analista")
     input.action.operation in [
-        "ExecuteQuery",
-        "ViewQuery",
-        "FilterCatalogs"
-    ]
-}
-
-# ------------------------------------------------------------------------------
-# RODRIGO: acesso aos catálogos
-# ------------------------------------------------------------------------------
-allow if {
-    input.context.identity.user == "rodrigo"
-    input.action.operation == "CheckCanAccessCatalog"
-    input.action.resource.catalog.catalogName in [
-        "iceberg",
-        "system",
-        "memory",
-        "tpch"
-    ]
-}
-
-# ------------------------------------------------------------------------------
-# RODRIGO: operações de metadata
-# ------------------------------------------------------------------------------
-allow if {
-    input.context.identity.user == "rodrigo"
-    input.action.operation in [
+        "CheckCanAccessCatalog",
+        "CheckCanShowSchemas",
+        "CheckCanShowTables",
         "FilterSchemas",
         "FilterTables",
         "FilterColumns",
@@ -57,74 +52,38 @@ allow if {
         "ShowColumns",
         "UseSchema"
     ]
-
-    not is_financeiro()
 }
 
 # ------------------------------------------------------------------------------
-# RODRIGO: SELECT liberado exceto financeiro
+# ANALISTA: SELECT em qualquer schema EXCETO financeiro
 # ------------------------------------------------------------------------------
 allow if {
-    input.context.identity.user == "rodrigo"
+    has_role(input.context.identity.user, "analista")
     input.action.operation == "SelectFromColumns"
-
-    schema := object.get(
-        input.action.resource.table,
-        "schemaName",
-        ""
-    )
-
-    schema != "financeiro"
+    input.action.resource.table.schemaName != "financeiro"
 }
 
 # ------------------------------------------------------------------------------
-# RODRIGO: INSERT e CREATE apenas em sandbox e api_lab
+# ANALISTA: INSERT e CREATE TABLE apenas em sandbox e api_lab
 # ------------------------------------------------------------------------------
 allow if {
-    input.context.identity.user == "rodrigo"
-
-    input.action.operation in [
-        "InsertIntoTable",
-        "CreateTable"
-    ]
-
-    input.action.resource.table.schemaName in [
-        "sandbox",
-        "api_lab"
-    ]
+    has_role(input.context.identity.user, "analista")
+    input.action.operation in ["InsertIntoTable", "CreateTable"]
+    input.action.resource.table.schemaName in ["sandbox", "api_lab"]
 }
 
 # ------------------------------------------------------------------------------
-# Função auxiliar
-# ------------------------------------------------------------------------------
-is_financeiro if {
-    object.get(
-        object.get(input.action.resource, "schema", {}),
-        "schemaName",
-        ""
-    ) == "financeiro"
-}
-
-is_financeiro if {
-    object.get(
-        object.get(input.action.resource, "table", {}),
-        "schemaName",
-        ""
-    ) == "financeiro"
-}
-
-# ------------------------------------------------------------------------------
-# DEBUG
+# AUDITORIA: Loga todas as negações
 # ------------------------------------------------------------------------------
 deny contains msg if {
     not allow
-
     msg := sprintf(
-        "OPA DENIED user=%v operation=%v resource=%v",
+        "OPA DENIED: user=%s op=%s schema=%s table=%s",
         [
             input.context.identity.user,
             input.action.operation,
-            input.action.resource
+            object.get(input.action.resource.table, "schemaName", "N/A"),
+            object.get(input.action.resource.table, "tableName", "N/A")
         ]
     )
 }
