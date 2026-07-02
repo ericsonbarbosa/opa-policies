@@ -19,13 +19,27 @@ allow if {
 }
 
 # ------------------------------------------------------------------------------
+# RODRIGO (Analista): Acesso aos catálogos (PRÉ-REQUISITO para qualquer operação)
+# Sem isso, Trino bloqueia antes mesmo de consultar schemas/tabelas
+# ------------------------------------------------------------------------------
+allow if {
+    input.context.identity.user == "rodrigo"
+    input.action.operation == "CheckCanAccessCatalog"
+    input.action.resource.catalog.catalogName in ["iceberg", "system", "memory", "tpch"]
+}
+
+# ------------------------------------------------------------------------------
 # RODRIGO (Analista): Operações de listagem e metadados
 # SHOW SCHEMAS, SHOW TABLES, USE schema
 # ------------------------------------------------------------------------------
 allow if {
     input.context.identity.user == "rodrigo"
+    input.action.operation == "FilterSchemas"
+}
+
+allow if {
+    input.context.identity.user == "rodrigo"
     input.action.operation in [
-        "FilterSchemas", 
         "FilterTables", 
         "FilterColumns",
         "ShowSchemas",
@@ -33,18 +47,11 @@ allow if {
         "ShowColumns",
         "UseSchema"
     ]
-    # Permite em qualquer schema EXCETO financeiro
     schema_name := object.get(input.action.resource, "schema", {}).schemaName
     schema_name != "financeiro"
     
     table_schema := object.get(input.action.resource.table, "schemaName", "")
     table_schema != "financeiro"
-}
-
-# Caso especial: FilterSchemas não tem resource.schemaName, então sempre permite
-allow if {
-    input.context.identity.user == "rodrigo"
-    input.action.operation == "FilterSchemas"
 }
 
 # ------------------------------------------------------------------------------
