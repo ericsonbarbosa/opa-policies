@@ -4,8 +4,8 @@ import future.keywords.in
 import future.keywords.if
 
 # ==============================================================================
-# POLÍTICA TRINO-OPA (Default Deny + Allow List Explícita)
-# Segurança máxima: apenas o que está explicitamente permitido é autorizado
+# POLÍTICA TRINO-OPA (Default Deny + Allow List)
+# Permite operações de infraestrutura e bloqueia apenas financeiro
 # ==============================================================================
 
 default allow := false
@@ -18,14 +18,13 @@ allow if {
 }
 
 # ------------------------------------------------------------------------------
-# RODRIGO: Operações de infraestrutura (necessárias para queries funcionarem)
+# RODRIGO: Operações de infraestrutura (necessárias para qualquer query)
 # ------------------------------------------------------------------------------
 allow if {
     input.context.identity.user == "rodrigo"
     input.action.operation in [
         "ExecuteQuery",
         "AccessCatalog",
-        "CheckCanAccessCatalog",
         "ShowSchemas",
         "FilterSchemas",
         "ShowTables",
