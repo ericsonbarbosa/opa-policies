@@ -18,8 +18,8 @@ allow if {
 # ------------------------------------------------------------------------------
 allow if {
     input.context.identity.user == "rodrigo"
-    input.action.operation == "CheckCanAccessCatalog"
-    input.action.resource.catalog.catalogName in ["iceberg", "system", "memory", "tpch"]
+    input.action.operation == "AccessCatalog"
+    input.action.resource.catalog.name in ["iceberg", "system", "memory", "tpch"]
 }
 
 # ------------------------------------------------------------------------------
