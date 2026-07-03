@@ -2,11 +2,7 @@ package trino
 
 import future.keywords.in
 import future.keywords.if
-
-# ==============================================================================
-# POLÍTICA TRINO-OPA (Default Deny + Allow List)
-# Permite operações de infraestrutura e bloqueia apenas financeiro
-# ==============================================================================
+import future.keywords.contains
 
 default allow := false
 
@@ -18,16 +14,25 @@ allow if {
 }
 
 # ------------------------------------------------------------------------------
-# RODRIGO: Acesso ao catálogo iceberg (obrigatório para qualquer operação)
+# RODRIGO: Acesso ao catálogo — fase 1 (verificação prévia do parser)
+# ------------------------------------------------------------------------------
+allow if {
+    input.context.identity.user == "rodrigo"
+    input.action.operation == "CheckCanAccessCatalog"
+    input.action.resource.catalog.catalogName in ["iceberg", "system", "memory", "tpch"]
+}
+
+# ------------------------------------------------------------------------------
+# RODRIGO: Acesso ao catálogo — fase 2 (acesso efetivo na execução)
 # ------------------------------------------------------------------------------
 allow if {
     input.context.identity.user == "rodrigo"
     input.action.operation == "AccessCatalog"
-    input.action.resource.catalog.name == "iceberg"
+    input.action.resource.catalog.catalogName in ["iceberg", "system", "memory", "tpch"]
 }
 
 # ------------------------------------------------------------------------------
-# RODRIGO: Operações de infraestrutura (necessárias para queries funcionarem)
+# RODRIGO: Operações de infraestrutura
 # ------------------------------------------------------------------------------
 allow if {
     input.context.identity.user == "rodrigo"
