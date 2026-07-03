@@ -18,20 +18,32 @@ allow if {
 }
 
 # ------------------------------------------------------------------------------
-# RODRIGO: Operações de infraestrutura (necessárias para qualquer query)
+# RODRIGO: Acesso ao catálogo iceberg (obrigatório para qualquer operação)
+# ------------------------------------------------------------------------------
+allow if {
+    input.context.identity.user == "rodrigo"
+    input.action.operation == "AccessCatalog"
+    input.action.resource.catalog.name == "iceberg"
+}
+
+# ------------------------------------------------------------------------------
+# RODRIGO: Operações de infraestrutura (necessárias para queries funcionarem)
 # ------------------------------------------------------------------------------
 allow if {
     input.context.identity.user == "rodrigo"
     input.action.operation in [
         "ExecuteQuery",
-        "AccessCatalog",
         "ShowSchemas",
         "FilterSchemas",
         "ShowTables",
         "FilterTables",
         "ShowColumns",
         "FilterColumns",
-        "UseSchema"
+        "UseSchema",
+        "CreateView",
+        "DropView",
+        "ShowFunctions",
+        "FilterFunctions"
     ]
 }
 
@@ -41,7 +53,8 @@ allow if {
 allow if {
     input.context.identity.user == "rodrigo"
     input.action.operation == "SelectFromColumns"
-    input.action.resource.table.schemaName != "financeiro"
+    schema_name := object.get(input.action.resource.table, "schemaName", "")
+    schema_name != "financeiro"
 }
 
 # ------------------------------------------------------------------------------
@@ -50,7 +63,8 @@ allow if {
 allow if {
     input.context.identity.user == "rodrigo"
     input.action.operation == "InsertIntoTable"
-    input.action.resource.table.schemaName in ["sandbox", "api_lab"]
+    schema_name := object.get(input.action.resource.table, "schemaName", "")
+    schema_name in ["sandbox", "api_lab"]
 }
 
 # ------------------------------------------------------------------------------
@@ -59,7 +73,8 @@ allow if {
 allow if {
     input.context.identity.user == "rodrigo"
     input.action.operation == "CreateTable"
-    input.action.resource.table.schemaName in ["sandbox", "api_lab"]
+    schema_name := object.get(input.action.resource.table, "schemaName", "")
+    schema_name in ["sandbox", "api_lab"]
 }
 
 # ------------------------------------------------------------------------------
