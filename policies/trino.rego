@@ -29,6 +29,15 @@ allow if {
 }
 
 # ------------------------------------------------------------------------------
+# RODRIGO: FilterSchemas — financeiro fica oculto do SHOW SCHEMAS
+# ------------------------------------------------------------------------------
+allow if {
+    input.context.identity.user == "rodrigo"
+    input.action.operation == "FilterSchemas"
+    input.action.resource.schema.schemaName != "financeiro"
+}
+
+# ------------------------------------------------------------------------------
 # RODRIGO: Operações de infraestrutura
 # ------------------------------------------------------------------------------
 allow if {
@@ -36,7 +45,6 @@ allow if {
     input.action.operation in [
         "ExecuteQuery",
         "ShowSchemas",
-        "FilterSchemas",
         "ShowTables",
         "FilterTables",
         "ShowColumns",
