@@ -1,0 +1,9 @@
+{
+  "revision": "v2-2026-07-04",
+  "roots": ["trino"],
+  "metadata": {
+    "author": "ericson",
+    "environment": "lab",
+    "generated_at": "2026-07-04T00:00:00Z"
+  }
+}
