@@ -14,21 +14,18 @@ allow if {
 }
 
 # ------------------------------------------------------------------------------
-# RODRIGO: Acesso ao catálogo — fase 1 (verificação prévia do parser)
+# RODRIGO: Operações de catálogo
+# Cobre CheckCanAccessCatalog (usa catalogName), AccessCatalog e FilterCatalogs
+# (usam name) — object.get trata ambos os campos sem erro
 # ------------------------------------------------------------------------------
 allow if {
     input.context.identity.user == "rodrigo"
-    input.action.operation == "AccessCatalog"
-    input.action.resource.catalog.name in ["iceberg", "system", "memory", "tpch"]
-}
-
-# ------------------------------------------------------------------------------
-# RODRIGO: Acesso ao catálogo — fase 2 (acesso efetivo na execução)
-# ------------------------------------------------------------------------------
-allow if {
-    input.context.identity.user == "rodrigo"
-    input.action.operation == "AccessCatalog"
-    input.action.resource.catalog.catalogName in ["iceberg", "system", "memory", "tpch"]
+    input.action.operation in ["CheckCanAccessCatalog", "AccessCatalog", "FilterCatalogs"]
+    catalog_name := object.get(
+        input.action.resource.catalog, "name",
+        object.get(input.action.resource.catalog, "catalogName", "")
+    )
+    catalog_name in ["iceberg", "system", "memory", "tpch"]
 }
 
 # ------------------------------------------------------------------------------
