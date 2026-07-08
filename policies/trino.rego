@@ -4,6 +4,10 @@ import future.keywords.in
 import future.keywords.if
 import future.keywords.contains
 
+# ==============================================================================
+# POLÍTICA TRINO-OPA (Default Deny + Allow List + Column Masking)
+# ==============================================================================
+
 default allow := false
 
 # ------------------------------------------------------------------------------
@@ -15,8 +19,6 @@ allow if {
 
 # ------------------------------------------------------------------------------
 # RODRIGO: Operações de catálogo
-# Cobre CheckCanAccessCatalog (usa catalogName), AccessCatalog e FilterCatalogs
-# (usam name) — object.get trata ambos os campos sem erro
 # ------------------------------------------------------------------------------
 allow if {
     input.context.identity.user == "rodrigo"
@@ -59,12 +61,21 @@ allow if {
 
 # ------------------------------------------------------------------------------
 # RODRIGO: SELECT em qualquer schema EXCETO financeiro
+# EXCEÇÃO: financeiro.vendas_com_dados_sensiveis (com column masking)
 # ------------------------------------------------------------------------------
 allow if {
     input.context.identity.user == "rodrigo"
     input.action.operation == "SelectFromColumns"
     schema_name := object.get(input.action.resource.table, "schemaName", "")
     schema_name != "financeiro"
+}
+
+# Permite SELECT específico em financeiro.vendas_com_dados_sensiveis (com masking)
+allow if {
+    input.context.identity.user == "rodrigo"
+    input.action.operation == "SelectFromColumns"
+    input.action.resource.table.schemaName == "financeiro"
+    input.action.resource.table.tableName == "vendas_com_dados_sensiveis"
 }
 
 # ------------------------------------------------------------------------------
@@ -85,6 +96,38 @@ allow if {
     input.action.operation == "CreateTable"
     schema_name := object.get(input.action.resource.table, "schemaName", "")
     schema_name in ["sandbox", "api_lab"]
+}
+
+# ==============================================================================
+# COLUMN MASKING (Ofuscação de Dados Sensíveis)
+# ==============================================================================
+
+column_resource := input.action.resource.column
+
+# Admin vê tudo sem máscara (não aplica masking)
+is_admin if {
+    input.context.identity.user == "admin"
+}
+
+# Mascara CPF: mostra apenas os 3 dígitos do meio (***.456.***-**)
+columnMask := {"expression": "'***.' || substring(cpf, 5, 3) || '.***-**'"} if {
+    not is_admin
+    column_resource.tableName == "vendas_com_dados_sensiveis"
+    column_resource.columnName == "cpf"
+}
+
+# Mascara telefone: mostra apenas os 4 últimos dígitos (119****8888)
+columnMask := {"expression": "substring(telefone, 1, 3) || '****' || substring(telefone, 8, 4)"} if {
+    not is_admin
+    column_resource.tableName == "vendas_com_dados_sensiveis"
+    column_resource.columnName == "telefone"
+}
+
+# Mascara dados_sensiveis completamente
+columnMask := {"expression": "'[REDACTED]'"} if {
+    not is_admin
+    column_resource.tableName == "vendas_com_dados_sensiveis"
+    column_resource.columnName == "dados_sensiveis"
 }
 
 # ------------------------------------------------------------------------------
