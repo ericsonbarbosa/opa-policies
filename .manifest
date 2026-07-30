@@ -1,6 +1,6 @@
 {
   "revision": "v2-2026-07-04",
-  "roots": ["trino"],
+  "roots": ["portal"],
   "metadata": {
     "author": "ericson",
     "environment": "lab",

@@ -1,0 +1,51 @@
+{
+  "user_permissions": {
+    "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJjb2xlY2FvIjoiNjg0NzQzOWE5ODU5YjIxMjU2OTZkYmNjIiwiaWF0IjoxNzQ5NTAwODI2fQ.icfp7TTqYpQdGdDs3-zVc_rNxbgxmNXAQ3jRxeNBV6M": {
+      "colecao_id": "6847439a9859b2125696dbcc",
+      "nome_colecao": "teste_poseidon2",
+      "campos_permitidos": [
+        "emp_no",
+        "birth_date",
+        "first_name",
+        "last_name",
+        "gender",
+        "hire_date"
+      ],
+      "tipo_campos": "Completo",
+      "tipo_colecao": "tabular",
+      "filtros": [
+        "emp_no",
+        "birth_date",
+        "first_name",
+        "last_name",
+        "gender",
+        "hire_date"
+      ],
+      "anonimizacao": []
+    },
+    "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJjb2xlY2FvIjoiNjg0NzM1ZTcxYjZiODQ3YWU3OTQ0YWEzIiwidXN1YXJpbyI6IjY0OWIzOTZkZTk3ZjhiNTI2YzQ1ZDE1NCIsImlhdCI6MTc0OTUwMTM4MX0.XsliM8_VQ7hBjf7TnQJ_7L_fKMhJ8iGs7srdwc6tiY4": {
+      "colecao_id": "684735e71b6b847ae7944aa3",
+      "nome_colecao": "teste_entidades",
+      "campos_permitidos": [
+        "candidato_cpf",
+        "candidato_nome"
+      ],
+      "tipo_campos": "Selecionados",
+      "tipo_query": "api",
+      "tipo_colecao": "tabular",
+      "filtros": [
+        "candidato_cpf",
+        "candidato_nome"
+      ],
+      "anonimizacao": [
+        {
+          "campo": "candidato_cpf",
+          "funcao": "token-sha256",
+          "simbolo": null,
+          "indice-regex": null,
+          "_id": "684745c59859b2125696dcc1"
+        }
+      ]
+    }
+  }
+}
