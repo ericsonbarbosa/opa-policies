@@ -2,7 +2,7 @@ package portal.authz
 
 import rego.v1
 
-# POLÍTICA PORTAL-OPA (Default Deny + Permissões por Token + Anonimização)
+# Política Portal-OPA: Default Deny + Permissões por Token + Anonimização
 
 default allow := false
 
@@ -85,7 +85,7 @@ required_filters := perm.filtros if {
     perm.nome_colecao == input.colecao
 }
 
-# METADATA: Retorna informações da coleção para o cliente
+# INFO DA COLEÇÃO: Retorna informações da coleção para o cliente
 collection_info := {
     "colecao_id": perm.colecao_id,
     "nome_colecao": perm.nome_colecao,
@@ -94,3 +94,18 @@ collection_info := {
     "campos_permitidos": perm.campos_permitidos,
 } if {
     perm := data.user_permissions[input.token]
+    perm.nome_colecao == input.colecao
+}
+
+# AUDITORIA: Loga todas as negações
+deny contains msg if {
+    not allow
+    msg := sprintf(
+        "PORTAL DENIED: token=%s colecao=%s campo=%s",
+        [
+            substring(input.token, 0, 20),
+            input.colecao,
+            input.campo,
+        ]
+    )
+}
