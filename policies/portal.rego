@@ -2,7 +2,7 @@ package portal.authz
 
 import rego.v1
 
-# Política Portal-OPA: Default Deny + Permissões por Token + Anonimização
+# Política Portal-OPA: Default Deny + Permissões por Token + Anonimização.
 
 default allow := false
 
