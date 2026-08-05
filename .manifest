@@ -1,6 +1,9 @@
 {
   "revision": "v2-2026-07-04",
-  "roots": ["portal"],
+  "roots": [
+    "portal",
+    "user_permissions"
+  ],
   "metadata": {
     "author": "ericson",
     "environment": "lab",
