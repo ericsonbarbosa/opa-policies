@@ -8,7 +8,6 @@ default allow := false
 # ==============================================================================
 # ACESSO PRINCIPAL
 # ==============================================================================
-# Unificamos a regra de 'allow' para que todas as condições ajam como AND (E)
 allow if {
     perm := data.user_permissions[input.token]
     perm.nome_colecao == input.colecao
@@ -20,31 +19,75 @@ allow if {
     is_tipo_query_valido(perm, input)
 }
 
-# Validação do Campo
-is_campo_valido(perm, input) if {
-    not input.campo # Permite requisições de nível de coleção (quando não pedem campo específico)
-}
-is_campo_valido(perm, input) if {
-    input.campo in perm.campos_permitidos
+# ==============================================================================
+# REGRAS DE VALIDAÇÃO DE CAMPO
+# ==============================================================================
+# Helper seguro: Verifica se a chave foi enviada, não é nula e não é vazia
+has_campo(req) if {
+    _ := req.campo
+    req.campo != ""
+    req.campo != null
 }
 
-# Validação do Tipo de Query
-is_tipo_query_valido(perm, input) if {
-    not input.tipo_query # Permite se a requisição não vier filtrada por tipo de query
+# 1. Permite requisições de nível de coleção (quando a chave 'campo' NÃO é enviada)
+is_campo_valido(perm, req) if {
+    not has_campo(req)
 }
-is_tipo_query_valido(perm, input) if {
-    input.tipo_query
-    not perm.tipo_query # Permite se o JSON do usuário não restringir um tipo de query
+
+# 2. Se a chave 'campo' foi enviada, ela é OBRIGADA a estar na lista de permitidos
+is_campo_valido(perm, req) if {
+    has_campo(req)
+    req.campo in perm.campos_permitidos
 }
-is_tipo_query_valido(perm, input) if {
-    input.tipo_query
-    perm.tipo_query == input.tipo_query # Aplica restrição estrita quando ambos existem
+
+# ==============================================================================
+# REGRAS DE VALIDAÇÃO DE TIPO DE QUERY
+# ==============================================================================
+has_req_tq(req) if {
+    _ := req.tipo_query
+    req.tipo_query != ""
+    req.tipo_query != null
+}
+
+has_perm_tq(perm) if {
+    _ := perm.tipo_query
+    perm.tipo_query != ""
+    perm.tipo_query != null
+}
+
+# 1. Permite se a requisição não vier filtrada por tipo de query
+is_tipo_query_valido(perm, req) if {
+    not has_req_tq(req)
+}
+
+# 2. Permite se a requisição tem tipo de query, mas o JSON do token NÃO restringe
+is_tipo_query_valido(perm, req) if {
+    has_req_tq(req)
+    not has_perm_tq(perm)
+}
+
+# 3. Aplica restrição estrita quando AMBOS existem (Token restringe e Input pede)
+is_tipo_query_valido(perm, req) if {
+    has_req_tq(req)
+    has_perm_tq(perm)
+    valida_match_tipo_query(perm.tipo_query, req.tipo_query)
+}
+
+# Suporta match caso o token traga uma string única (ex: "api")
+valida_match_tipo_query(perm_tq, req_tq) if {
+    is_string(perm_tq)
+    perm_tq == req_tq
+}
+
+# Suporta match caso o token traga um array de tipos (ex: ["api", "sql"])
+valida_match_tipo_query(perm_tq, req_tq) if {
+    is_array(perm_tq)
+    req_tq in perm_tq
 }
 
 # ==============================================================================
 # ANONIMIZAÇÃO
 # ==============================================================================
-# Verifica se o campo possui regra de anonimização válida (Ignora sujeira nula do data.json)
 has_anonymization if {
     perm := data.user_permissions[input.token]
     perm.nome_colecao == input.colecao
@@ -53,7 +96,6 @@ has_anonymization if {
     rule.funcao != null
 }
 
-# Retorna a regra de anonimização aplicável ao campo
 anonymize_rule := rule if {
     perm := data.user_permissions[input.token]
     perm.nome_colecao == input.colecao
@@ -62,40 +104,29 @@ anonymize_rule := rule if {
     rule.funcao != null
 }
 
-# COLUMN MASKING: token-sha256
 columnMask := {"expression": "'***'"} if {
     anonymize_rule.funcao == "token-sha256"
 }
-
-# COLUMN MASKING: mascarar-por-completo
 columnMask := {"expression": sprintf("'%s'", [anonymize_rule.simbolo])} if {
     anonymize_rule.funcao == "mascarar-por-completo"
     anonymize_rule.simbolo != null
 }
 columnMask := {"expression": "'***'"} if {
     anonymize_rule.funcao == "mascarar-por-completo"
-    anonymize_rule.simbolo == null # Fallback caso o símbolo venha nulo
+    anonymize_rule.simbolo == null
 }
-
-# COLUMN MASKING: partial-mask
 columnMask := {"expression": sprintf("substring(%s, 1, %d) || '***'", [input.campo, anonymize_rule["indice-regex"]])} if {
     anonymize_rule.funcao == "partial-mask"
     anonymize_rule["indice-regex"] != null
 }
-
-# COLUMN MASKING: symbol-replace
 columnMask := {"expression": sprintf("'%s'", [anonymize_rule.simbolo])} if {
     anonymize_rule.funcao == "symbol-replace"
     anonymize_rule.simbolo != null
 }
-
-# COLUMN MASKING: regex-mask
 columnMask := {"expression": sprintf("regexp_replace(%s, '%s', '***')", [input.campo, anonymize_rule["indice-regex"]])} if {
     anonymize_rule.funcao == "regex-mask"
     anonymize_rule["indice-regex"] != null
 }
-
-# COLUMN MASKING: Fallback para funções desconhecidas
 columnMask := {"expression": "'***'"} if {
     has_anonymization
     not anonymize_rule.funcao in ["token-sha256", "mascarar-por-completo", "partial-mask", "symbol-replace", "regex-mask"]
@@ -104,13 +135,11 @@ columnMask := {"expression": "'***'"} if {
 # ==============================================================================
 # INFORMAÇÕES DA COLEÇÃO E AUDITORIA
 # ==============================================================================
-# Retorna filtros obrigatórios
 required_filters := perm.filtros if {
     perm := data.user_permissions[input.token]
     perm.nome_colecao == input.colecao
 }
 
-# Retorna informações da coleção
 collection_info := {
     "colecao_id": perm.colecao_id,
     "nome_colecao": perm.nome_colecao,
@@ -122,7 +151,6 @@ collection_info := {
     perm.nome_colecao == input.colecao
 }
 
-# Loga as negações usando object.get para evitar erros se 'campo' não for passado na request
 deny contains msg if {
     not allow
     campo_str := object.get(input, "campo", "N/A")
