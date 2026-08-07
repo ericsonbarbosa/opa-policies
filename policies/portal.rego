@@ -30,14 +30,13 @@ has_campo(req) if {
 }
 
 # 1. Permite requisições de nível de coleção (quando a chave 'campo' NÃO é enviada)
-is_campo_valido(perm, req) if {
-    not has_campo(req)
-}
+is_campo_valido(perm, req) if not has_campo(req)
 
 # 2. Se a chave 'campo' foi enviada, ela é OBRIGADA a estar na lista de permitidos
+# Correção: Uso de object.get para evitar erros de undefined caso a lista não exista
 is_campo_valido(perm, req) if {
     has_campo(req)
-    req.campo in perm.campos_permitidos
+    req.campo in object.get(perm, "campos_permitidos", [])
 }
 
 # ==============================================================================
@@ -56,9 +55,7 @@ has_perm_tq(perm) if {
 }
 
 # 1. Permite se a requisição não vier filtrada por tipo de query
-is_tipo_query_valido(perm, req) if {
-    not has_req_tq(req)
-}
+is_tipo_query_valido(perm, req) if not has_req_tq(req)
 
 # 2. Permite se a requisição tem tipo de query, mas o JSON do token NÃO restringe
 is_tipo_query_valido(perm, req) if {
@@ -88,10 +85,11 @@ valida_match_tipo_query(perm_tq, req_tq) if {
 # ==============================================================================
 # ANONIMIZAÇÃO
 # ==============================================================================
+# Correção: Uso de object.get para lidar com tokens sem a chave "anonimizacao"
 has_anonymization if {
     perm := data.user_permissions[input.token]
     perm.nome_colecao == input.colecao
-    some rule in perm.anonimizacao
+    some rule in object.get(perm, "anonimizacao", [])
     rule.campo == input.campo
     rule.funcao != null
 }
@@ -99,12 +97,13 @@ has_anonymization if {
 anonymize_rule := rule if {
     perm := data.user_permissions[input.token]
     perm.nome_colecao == input.colecao
-    some rule in perm.anonimizacao
+    some rule in object.get(perm, "anonimizacao", [])
     rule.campo == input.campo
     rule.funcao != null
 }
 
-columnMask := {"expression": "'***'"} if {
+# Correção: columnMask do sha256 foi ajustado para refletir a lógica de hash (não apenas asteriscos)
+columnMask := {"expression": sprintf("SHA256(CAST(%s AS VARCHAR))", [input.campo])} if {
     anonymize_rule.funcao == "token-sha256"
 }
 columnMask := {"expression": sprintf("'%s'", [anonymize_rule.simbolo])} if {
@@ -135,31 +134,41 @@ columnMask := {"expression": "'***'"} if {
 # ==============================================================================
 # INFORMAÇÕES DA COLEÇÃO E AUDITORIA
 # ==============================================================================
-required_filters := perm.filtros if {
+# Correção: Retorno seguro em required_filters caso 'filtros' não exista no JSON
+required_filters := res if {
     perm := data.user_permissions[input.token]
     perm.nome_colecao == input.colecao
+    res := object.get(perm, "filtros", [])
 }
 
+# Correção: Fallback seguro via object.get em todos os nós críticos do payload
 collection_info := {
-    "colecao_id": perm.colecao_id,
+    "colecao_id": object.get(perm, "colecao_id", null),
     "nome_colecao": perm.nome_colecao,
-    "tipo_colecao": perm.tipo_colecao,
-    "tipo_campos": perm.tipo_campos,
-    "campos_permitidos": perm.campos_permitidos,
+    "tipo_colecao": object.get(perm, "tipo_colecao", "N/A"),
+    "tipo_campos": object.get(perm, "tipo_campos", "N/A"),
+    "campos_permitidos": object.get(perm, "campos_permitidos", []),
 } if {
     perm := data.user_permissions[input.token]
     perm.nome_colecao == input.colecao
 }
 
+# Correção: Auditoria blindada. Previne "undefined exception" caso o token não seja uma string ou colecao/campo sejam omitidos.
 deny contains msg if {
     not allow
     campo_str := object.get(input, "campo", "N/A")
+    colecao_str := object.get(input, "colecao", "N/A")
+    token_raw := object.get(input, "token", "N/A")
+    
     msg := sprintf(
         "PORTAL DENIED: token=%s colecao=%s campo=%s",
         [
-            substring(input.token, 0, 20),
-            input.colecao,
+            format_token(token_raw),
+            colecao_str,
             campo_str
         ]
     )
 }
+
+format_token(t) := substring(t, 0, 20) if is_string(t)
+format_token(t) := "INVALID_OR_MISSING" if not is_string(t)
