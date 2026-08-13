@@ -2,53 +2,44 @@ package portal.authz
 
 import rego.v1
 
-# Política Unificada: Default Deny + Permissões por Token/Usuário + Anonimização.
-# Funciona tanto para chamadas diretas do Portal quanto para o Plugin do Trino.
+# Política Unificada: A verdade sobre os acessos reside EXCLUSIVAMENTE no data.json.
+# Não há usuários hardcoded. Default Deny para tudo.
 default allow := false
 
 # ==============================================================================
 # CAMADA DE NORMALIZAÇÃO DE INPUT (Traduz Trino e Portal para um formato único)
 # ==============================================================================
 
-# 1. Identifica o usuário/token (Trino usa context.identity.user, Portal usa token)
 get_token := t if {
     t := object.get(input.context.identity, "user", object.get(input, "token", ""))
 }
 
-# 2. Identifica a coleção (Trino usa schemaName, Portal usa colecao)
 get_colecao := c if {
     c := object.get(input.action.resource.table, "schemaName", object.get(input, "colecao", ""))
 }
 
-# 3. Identifica o campo (Trino usa columnName, Portal usa campo)
 get_campo := f if {
     f := object.get(input.action.resource.column, "columnName", object.get(input, "campo", ""))
 }
 
-# 4. Identifica ou infere o tipo de query
 get_tipo_query := tq if {
     raw := object.get(input.action, "operation", object.get(input, "tipo_query", ""))
     tq := infer_tipo_query(raw)
 }
 
-# Helper para inferir tipo de query a partir da operação do Trino
 infer_tipo_query(op) := "api" if {
     is_string(op)
-    # Operações de leitura no Trino mapeiam para "api" no seu modelo
     regex.match("(?i)^(show|select|describe|use)", op)
 }
 infer_tipo_query(op) := "jdbc" if {
     is_string(op)
-    # Operações de escrita/DDL mapeiam para "jdbc"
     regex.match("(?i)^(insert|create|drop|alter|delete)", op)
 }
 infer_tipo_query(op) := op if {
-    # Se já for um tipo válido do seu modelo, mantém
     op in ["api", "jdbc", "api_doc", "jdbc_dm"]
 }
 infer_tipo_query(_) := "N/A"
 
-# Objeto de requisição padronizado para TODAS as regras abaixo
 req := {
     "token": get_token,
     "colecao": get_colecao,
@@ -57,21 +48,46 @@ req := {
 }
 
 # ==============================================================================
-# ACESSO PRINCIPAL (Usando o req padronizado)
+# 1. ACESSO A METADATA (Listar Catálogos, Schemas, Tabelas, Colunas)
+# Permite que qualquer token válido no data.json liste a estrutura do banco,
+# desde que o tipo_query seja compatível. Isso NÃO concede acesso aos dados.
+# ==============================================================================
+allow if {
+    # O token DEVE existir no data.json
+    perm := data.user_permissions[req.token]
+    
+    # A operação DEVE ser de metadata (enviada pelo plugin do Trino)
+    is_trino_metadata_operation
+    
+    # O tipo_query DEVE ser compatível com a permissão do token
+    is_tipo_query_valido(perm, req)
+}
+
+# Helper para identificar operações de metadata do Trino
+is_trino_metadata_operation if {
+    op := input.action.operation
+    op in ["ShowCatalogs", "ShowSchemas", "ShowTables", "ShowColumns", "DescribeTable"]
+}
+
+# ==============================================================================
+# 2. ACESSO A DADOS (Regra Principal - Exige match de coleção e campo)
+# Esta é a regra que PROTEGE os dados. Ela não foi alterada e continua rigorosa.
 # ==============================================================================
 allow if {
     perm := data.user_permissions[req.token]
+    
+    # O token DEVE ter acesso a esta coleção específica
     perm.nome_colecao == req.colecao
 
-    # Verifica se o campo solicitado é válido para este token
+    # O campo DEVE estar na lista de permitidos
     is_campo_valido(perm, req)
 
-    # Verifica se a operação/query é compatível
+    # O tipo de operação DEVE ser compatível com o token
     is_tipo_query_valido(perm, req)
 }
 
 # ==============================================================================
-# REGRAS DE VALIDAÇÃO DE CAMPO
+# REGRAS DE VALIDAÇÃO DE CAMPO (Inalteradas)
 # ==============================================================================
 has_campo(r) if {
     _ := r.campo
@@ -87,7 +103,7 @@ is_campo_valido(perm, r) if {
 }
 
 # ==============================================================================
-# REGRAS DE VALIDAÇÃO DE TIPO DE QUERY
+# REGRAS DE VALIDAÇÃO DE TIPO DE QUERY (Inalteradas)
 # ==============================================================================
 has_req_tq(r) if {
     _ := r.tipo_query
@@ -125,7 +141,7 @@ valida_match_tipo_query(perm_tq, req_tq) if {
 }
 
 # ==============================================================================
-# ANONIMIZAÇÃO (Adaptada para usar o req padronizado)
+# ANONIMIZAÇÃO (Inalterada)
 # ==============================================================================
 has_anonymization if {
     perm := data.user_permissions[req.token]
@@ -143,7 +159,6 @@ anonymize_rule := rule if {
     rule.funcao != null
 }
 
-# O plugin do Trino lê a chave "expression". Sua lógica já está perfeita para isso.
 columnMask := {"expression": sprintf("SHA256(CAST(%s AS VARCHAR))", [req.campo])} if {
     anonymize_rule.funcao == "token-sha256"
 }
@@ -173,7 +188,7 @@ columnMask := {"expression": "'***'"} if {
 }
 
 # ==============================================================================
-# INFORMAÇÕES DA COLEÇÃO E AUDITORIA
+# INFORMAÇÕES DA COLEÇÃO E AUDITORIA (Inalteradas)
 # ==============================================================================
 required_filters := res if {
     perm := data.user_permissions[req.token]
