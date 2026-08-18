@@ -10,78 +10,76 @@ import rego.v1
 default allow := false
 
 # ==============================================================================
-# CAMADA DE NORMALIZAÇÃO DE INPUT
-# Traduz tanto o formato do Portal (token/colecao/campo) quanto o do Trino
-# (context.identity.user / action.resource) para um objeto único chamado "req".
+# CAMADA DE NORMALIZAÇÃO DE INPUT (BLINDADA)
+# Extrai os objetos aninhados de forma segura para evitar quebras quando o
+# Trino não envia o objeto "resource" (ex: na operação ExecuteQuery).
 # ==============================================================================
 
-# Token/Usuário: pega o user do Trino OU o token do Portal
+# Extração segura de objetos aninhados
+get_identity := object.get(input, "identity", object.get(object.get(input, "context", {}), "identity", {}))
+get_action := object.get(input, "action", {})
+get_resource := object.get(get_action, "resource", {})
+get_table := object.get(get_resource, "table", {})
+get_column := object.get(get_resource, "column", {})
+
+# Token/Usuário
 get_token := t if {
-    t := object.get(input.context.identity, "user", object.get(input, "token", ""))
+    t := object.get(get_identity, "user", object.get(input, "token", ""))
 }
 
-# Coleção: prioriza tableName (nome real da tabela no Trino),
-# depois schemaName, depois o campo colecao do Portal
+# Coleção: prioriza tableName, depois schemaName, depois o campo colecao do Portal
 get_colecao := c if {
     c := object.get(
-        input.action.resource.table,
+        get_table,
         "tableName",
-        object.get(input.action.resource.table, "schemaName", object.get(input, "colecao", ""))
+        object.get(get_table, "schemaName", object.get(input, "colecao", ""))
     )
 }
 
-# Campo: pega columnName do Trino OU campo do Portal
+# Campo
 get_campo := f if {
-    f := object.get(input.action.resource.column, "columnName", object.get(input, "campo", ""))
+    f := object.get(get_column, "columnName", object.get(input, "campo", ""))
 }
 
-# Tipo de Query: prioriza um tipo_query EXPLÍCITO (enviado no input).
-# Se não houver, infere a partir da operação.
+# Tipo de Query: prioriza um tipo_query EXPLÍCITO. Se não houver, infere da operação.
 get_tipo_query := tq if {
-    raw := object.get(input.action, "tipo_query", object.get(input, "tipo_query", null))
+    raw := object.get(get_action, "tipo_query", object.get(input, "tipo_query", null))
     raw != null
     tq := raw
 }
 
 get_tipo_query := tq if {
-    object.get(input.action, "tipo_query", null) == null
+    object.get(get_action, "tipo_query", null) == null
     object.get(input, "tipo_query", null) == null
-    raw := object.get(input.action, "operation", "")
+    raw := object.get(get_action, "operation", "")
     tq := infer_tipo_query(raw)
 }
 
 # ==============================================================================
 # HELPER: INFERIR TIPO DE QUERY A PARTIR DA OPERAÇÃO
-# CORREÇÃO: As regras são mutuamente exclusivas (usando "not") para evitar
-# o erro "functions must not produce multiple outputs for same inputs".
 # ==============================================================================
-
-# Operações SQL vindas do Trino são SEMPRE "jdbc"
 infer_tipo_query(op) := "jdbc" if {
     is_string(op)
     regex.match("(?i)^(show|select|describe|use|insert|create|drop|alter|delete|execute)", op)
 }
 
-# Se a operação já for um tipo conhecido (Portal), mantém o valor
 infer_tipo_query(op) := op if {
     is_string(op)
     not regex.match("(?i)^(show|select|describe|use|insert|create|drop|alter|delete|execute)", op)
     op in ["api", "jdbc", "api_doc", "jdbc_dm"]
 }
 
-# Fallback para valores que NÃO são string
 infer_tipo_query(op) := "N/A" if {
     not is_string(op)
 }
 
-# Fallback para strings que não são SQL nem tipos conhecidos
 infer_tipo_query(op) := "N/A" if {
     is_string(op)
     not regex.match("(?i)^(show|select|describe|use|insert|create|drop|alter|delete|execute)", op)
     not op in ["api", "jdbc", "api_doc", "jdbc_dm"]
 }
 
-# Objeto de requisição padronizado para TODAS as regras abaixo
+# Objeto de requisição padronizado
 req := {
     "token": get_token,
     "colecao": get_colecao,
@@ -91,10 +89,6 @@ req := {
 
 # ==============================================================================
 # 1. GATE INICIAL + METADATA (ExecuteQuery, ShowCatalogs, etc.)
-# O Trino faz uma verificação genérica ANTES de saber qual tabela será acessada
-# (ex: operation "ExecuteQuery" sem resource.table). Se o token existe no
-# data.json, permitimos passar pelo gate. A proteção REAL dos dados está na
-# regra 2 abaixo, que exige match de coleção e campo.
 # ==============================================================================
 allow if {
     _ = data.user_permissions[req.token]
@@ -102,7 +96,7 @@ allow if {
 }
 
 is_gate_operation if {
-    op := object.get(input.action, "operation", "")
+    op := object.get(get_action, "operation", "")
     op in [
         "ExecuteQuery",
         "ShowCatalogs", "ShowSchemas", "ShowTables", "ShowColumns", "DescribeTable",
@@ -112,22 +106,12 @@ is_gate_operation if {
 
 # ==============================================================================
 # 2. ACESSO A DADOS (Regra Principal — PROTEGE os dados)
-# Só é avaliada quando o Trino envia uma tabela específica.
-# Exige match de coleção, campo permitido e tipo_query compatível.
 # ==============================================================================
 allow if {
     perm := data.user_permissions[req.token]
-
-    # Deve haver uma coleção específica na requisição
     req.colecao != ""
-
-    # O token DEVE ter acesso a esta coleção
     perm.nome_colecao == req.colecao
-
-    # O campo DEVE estar na lista de permitidos
     is_campo_valido(perm, req)
-
-    # O tipo de operação DEVE ser compatível com o token
     is_tipo_query_valido(perm, req)
 }
 
@@ -140,10 +124,8 @@ has_campo(r) if {
     r.campo != null
 }
 
-# Se não há campo específico (ex: operação de tabela), permite
 is_campo_valido(perm, r) if not has_campo(r)
 
-# Se há campo, ele DEVE estar na lista de permitidos
 is_campo_valido(perm, r) if {
     has_campo(r)
     r.campo in object.get(perm, "campos_permitidos", [])
@@ -164,16 +146,13 @@ has_perm_tq(perm) if {
     perm.tipo_query != null
 }
 
-# Se a requisição não tem tipo_query, permite
 is_tipo_query_valido(perm, r) if not has_req_tq(r)
 
-# Se a requisição tem tipo_query mas o token não restringe, permite
 is_tipo_query_valido(perm, r) if {
     has_req_tq(r)
     not has_perm_tq(perm)
 }
 
-# Se AMBOS existem, devem dar match
 is_tipo_query_valido(perm, r) if {
     has_req_tq(r)
     has_perm_tq(perm)
@@ -265,9 +244,9 @@ collection_info := {
 
 deny contains msg if {
     not allow
-    campo_str := object.get(input, "campo", object.get(input.action.resource.column, "columnName", "N/A"))
-    colecao_str := object.get(input, "colecao", object.get(input.action.resource.table, "tableName", object.get(input.action.resource.table, "schemaName", "N/A")))
-    token_raw := object.get(input, "token", object.get(input.context.identity, "user", "N/A"))
+    campo_str := object.get(input, "campo", object.get(get_column, "columnName", "N/A"))
+    colecao_str := object.get(input, "colecao", object.get(get_table, "tableName", object.get(get_table, "schemaName", "N/A")))
+    token_raw := object.get(input, "token", object.get(get_identity, "user", "N/A"))
 
     msg := sprintf(
         "ACCESS DENIED: user=%s colecao=%s campo=%s",
