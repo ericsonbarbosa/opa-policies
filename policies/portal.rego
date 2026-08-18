@@ -23,37 +23,42 @@ get_campo := f if {
 }
 
 get_tipo_query := tq if {
-    raw := object.get(input.action, "operation", object.get(input, "tipo_query", ""))
+    # 1. Prioridade MÁXIMA: Se há tipo_query explícito, usa-o
+    raw := object.get(input.action, "tipo_query", object.get(input, "tipo_query", null))
+    raw != null
+    tq := raw
+}
+
+get_tipo_query := tq if {
+    # 2. Fallback: Se NÃO há tipo_query explícito, infere da operação
+    object.get(input.action, "tipo_query", null) == null
+    object.get(input, "tipo_query", null) == null
+    raw := object.get(input.action, "operation", "")
     tq := infer_tipo_query(raw)
 }
 
-# Helper para inferir tipo de query a partir da operação do Trino
-# (CORRIGIDO: Exclusividade mútua para evitar eval_conflict_error)
-infer_tipo_query(op) := "api" if {
-    is_string(op)
-    regex.match("(?i)^(show|select|describe|use)", op)
-}
-
+# Helper para inferir tipo de query a partir da operação
+# CORREÇÃO: Operações SQL do Trino são SEMPRE "jdbc" (ou "jdbc_dm" para datamarts)
 infer_tipo_query(op) := "jdbc" if {
     is_string(op)
-    regex.match("(?i)^(insert|create|drop|alter|delete)", op)
-    not regex.match("(?i)^(show|select|describe|use)", op)
+    regex.match("(?i)^(show|select|describe|use|insert|create|drop|alter|delete)", op)
 }
 
-infer_tipo_query(op) := op if {
-    op in ["api", "jdbc", "api_doc", "jdbc_dm"]
-    not regex.match("(?i)^(show|select|describe|use|insert|create|drop|alter|delete)", op)
+# Operações de metadata específicas de datamart
+infer_tipo_query(op) := "jdbc_dm" if {
+    is_string(op)
+    op in ["ShowCatalogs", "ShowSchemas", "ShowTables", "ShowColumns", "DescribeTable"]
 }
 
-infer_tipo_query(op) := "N/A" if {
-    not is_string(op)
-}
-
-infer_tipo_query(op) := "N/A" if {
+# Fallback: se não é SQL, assume "api" (Portal)
+infer_tipo_query(op) := "api" if {
     is_string(op)
     not regex.match("(?i)^(show|select|describe|use|insert|create|drop|alter|delete)", op)
-    not op in ["api", "jdbc", "api_doc", "jdbc_dm"]
+    not op in ["ShowCatalogs", "ShowSchemas", "ShowTables", "ShowColumns", "DescribeTable"]
 }
+
+# Se não é string, retorna N/A
+infer_tipo_query(_) := "N/A"
 
 # Objeto de requisição padronizado para TODAS as regras abaixo
 req := {
