@@ -27,19 +27,35 @@ get_tipo_query := tq if {
     tq := infer_tipo_query(raw)
 }
 
+# Helper para inferir tipo de query a partir da operação do Trino
+# (CORRIGIDO: Exclusividade mútua para evitar eval_conflict_error)
 infer_tipo_query(op) := "api" if {
     is_string(op)
     regex.match("(?i)^(show|select|describe|use)", op)
 }
+
 infer_tipo_query(op) := "jdbc" if {
     is_string(op)
     regex.match("(?i)^(insert|create|drop|alter|delete)", op)
+    not regex.match("(?i)^(show|select|describe|use)", op)
 }
+
 infer_tipo_query(op) := op if {
     op in ["api", "jdbc", "api_doc", "jdbc_dm"]
+    not regex.match("(?i)^(show|select|describe|use|insert|create|drop|alter|delete)", op)
 }
-infer_tipo_query(_) := "N/A"
 
+infer_tipo_query(op) := "N/A" if {
+    not is_string(op)
+}
+
+infer_tipo_query(op) := "N/A" if {
+    is_string(op)
+    not regex.match("(?i)^(show|select|describe|use|insert|create|drop|alter|delete)", op)
+    not op in ["api", "jdbc", "api_doc", "jdbc_dm"]
+}
+
+# Objeto de requisição padronizado para TODAS as regras abaixo
 req := {
     "token": get_token,
     "colecao": get_colecao,
