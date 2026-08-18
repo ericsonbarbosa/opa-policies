@@ -14,8 +14,13 @@ get_token := t if {
     t := object.get(input.context.identity, "user", object.get(input, "token", ""))
 }
 
+# CORREÇÃO 1: Prioriza o tableName (nome da tabela/coleção) em vez do schemaName.
 get_colecao := c if {
-    c := object.get(input.action.resource.table, "schemaName", object.get(input, "colecao", ""))
+    c := object.get(
+        input.action.resource.table, 
+        "tableName", 
+        object.get(input.action.resource.table, "schemaName", object.get(input, "colecao", ""))
+    )
 }
 
 get_campo := f if {
@@ -38,37 +43,30 @@ get_tipo_query := tq if {
 }
 
 # ==============================================================================
-# HELPER: INFERIR TIPO DE QUERY (CORRIGIDO - Exclusividade Mútua)
+# HELPER: INFERIR TIPO DE QUERY
 # ==============================================================================
-
-# 1. Operações SQL padrão (Trino/JDBC)
 infer_tipo_query(op) := "jdbc" if {
     is_string(op)
     regex.match("(?i)^(show|select|describe|use|insert|create|drop|alter|delete)", op)
 }
 
-# 2. Operações de metadata específicas de datamart
 infer_tipo_query(op) := "jdbc_dm" if {
     is_string(op)
     not regex.match("(?i)^(show|select|describe|use|insert|create|drop|alter|delete)", op)
     op in ["ShowCatalogs", "ShowSchemas", "ShowTables", "ShowColumns", "DescribeTable"]
 }
 
-# 3. Fallback para operações de API (Portal)
 infer_tipo_query(op) := "api" if {
     is_string(op)
     not regex.match("(?i)^(show|select|describe|use|insert|create|drop|alter|delete)", op)
     not op in ["ShowCatalogs", "ShowSchemas", "ShowTables", "ShowColumns", "DescribeTable"]
 }
 
-# 4. Fallback absoluto: APENAS se o input NÃO for uma string
 infer_tipo_query(op) := "N/A" if {
     not is_string(op)
 }
 
-# ==============================================================================
 # Objeto de requisição padronizado
-# ==============================================================================
 req := {
     "token": get_token,
     "colecao": get_colecao,
@@ -78,11 +76,11 @@ req := {
 
 # ==============================================================================
 # 1. ACESSO A METADATA (Listar Catálogos, Schemas, Tabelas, Colunas)
+# CORREÇÃO 2: Se o token é válido, permite listar a estrutura (sem checar tipo_query)
 # ==============================================================================
 allow if {
     perm := data.user_permissions[req.token]
     is_trino_metadata_operation
-    is_tipo_query_valido(perm, req)
 }
 
 is_trino_metadata_operation if {
@@ -91,7 +89,7 @@ is_trino_metadata_operation if {
 }
 
 # ==============================================================================
-# 2. ACESSO A DADOS (Regra Principal)
+# 2. ACESSO A DADOS (Regra Principal - Exige match de coleção e campo)
 # ==============================================================================
 allow if {
     perm := data.user_permissions[req.token]
@@ -224,7 +222,7 @@ collection_info := {
 deny contains msg if {
     not allow
     campo_str := object.get(input, "campo", object.get(input.action.resource.column, "columnName", "N/A"))
-    colecao_str := object.get(input, "colecao", object.get(input.action.resource.table, "schemaName", "N/A"))
+    colecao_str := object.get(input, "colecao", object.get(input.action.resource.table, "tableName", object.get(input.action.resource.table, "schemaName", "N/A")))
     token_raw := object.get(input, "token", object.get(input.context.identity, "user", "N/A"))
     
     msg := sprintf(
