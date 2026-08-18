@@ -37,30 +37,38 @@ get_tipo_query := tq if {
     tq := infer_tipo_query(raw)
 }
 
-# Helper para inferir tipo de query a partir da operação
-# CORREÇÃO: Operações SQL do Trino são SEMPRE "jdbc" (ou "jdbc_dm" para datamarts)
+# ==============================================================================
+# HELPER: INFERIR TIPO DE QUERY (CORRIGIDO - Exclusividade Mútua)
+# ==============================================================================
+
+# 1. Operações SQL padrão (Trino/JDBC)
 infer_tipo_query(op) := "jdbc" if {
     is_string(op)
     regex.match("(?i)^(show|select|describe|use|insert|create|drop|alter|delete)", op)
 }
 
-# Operações de metadata específicas de datamart
+# 2. Operações de metadata específicas de datamart
 infer_tipo_query(op) := "jdbc_dm" if {
     is_string(op)
+    not regex.match("(?i)^(show|select|describe|use|insert|create|drop|alter|delete)", op)
     op in ["ShowCatalogs", "ShowSchemas", "ShowTables", "ShowColumns", "DescribeTable"]
 }
 
-# Fallback: se não é SQL, assume "api" (Portal)
+# 3. Fallback para operações de API (Portal)
 infer_tipo_query(op) := "api" if {
     is_string(op)
     not regex.match("(?i)^(show|select|describe|use|insert|create|drop|alter|delete)", op)
     not op in ["ShowCatalogs", "ShowSchemas", "ShowTables", "ShowColumns", "DescribeTable"]
 }
 
-# Se não é string, retorna N/A
-infer_tipo_query(_) := "N/A"
+# 4. Fallback absoluto: APENAS se o input NÃO for uma string
+infer_tipo_query(op) := "N/A" if {
+    not is_string(op)
+}
 
-# Objeto de requisição padronizado para TODAS as regras abaixo
+# ==============================================================================
+# Objeto de requisição padronizado
+# ==============================================================================
 req := {
     "token": get_token,
     "colecao": get_colecao,
@@ -70,45 +78,30 @@ req := {
 
 # ==============================================================================
 # 1. ACESSO A METADATA (Listar Catálogos, Schemas, Tabelas, Colunas)
-# Permite que qualquer token válido no data.json liste a estrutura do banco,
-# desde que o tipo_query seja compatível. Isso NÃO concede acesso aos dados.
 # ==============================================================================
 allow if {
-    # O token DEVE existir no data.json
     perm := data.user_permissions[req.token]
-    
-    # A operação DEVE ser de metadata (enviada pelo plugin do Trino)
     is_trino_metadata_operation
-    
-    # O tipo_query DEVE ser compatível com a permissão do token
     is_tipo_query_valido(perm, req)
 }
 
-# Helper para identificar operações de metadata do Trino
 is_trino_metadata_operation if {
     op := input.action.operation
     op in ["ShowCatalogs", "ShowSchemas", "ShowTables", "ShowColumns", "DescribeTable"]
 }
 
 # ==============================================================================
-# 2. ACESSO A DADOS (Regra Principal - Exige match de coleção e campo)
-# Esta é a regra que PROTEGE os dados. Ela não foi alterada e continua rigorosa.
+# 2. ACESSO A DADOS (Regra Principal)
 # ==============================================================================
 allow if {
     perm := data.user_permissions[req.token]
-    
-    # O token DEVE ter acesso a esta coleção específica
     perm.nome_colecao == req.colecao
-
-    # O campo DEVE estar na lista de permitidos
     is_campo_valido(perm, req)
-
-    # O tipo de operação DEVE ser compatível com o token
     is_tipo_query_valido(perm, req)
 }
 
 # ==============================================================================
-# REGRAS DE VALIDAÇÃO DE CAMPO (Inalteradas)
+# REGRAS DE VALIDAÇÃO DE CAMPO
 # ==============================================================================
 has_campo(r) if {
     _ := r.campo
@@ -124,7 +117,7 @@ is_campo_valido(perm, r) if {
 }
 
 # ==============================================================================
-# REGRAS DE VALIDAÇÃO DE TIPO DE QUERY (Inalteradas)
+# REGRAS DE VALIDAÇÃO DE TIPO DE QUERY
 # ==============================================================================
 has_req_tq(r) if {
     _ := r.tipo_query
@@ -162,7 +155,7 @@ valida_match_tipo_query(perm_tq, req_tq) if {
 }
 
 # ==============================================================================
-# ANONIMIZAÇÃO (Inalterada)
+# ANONIMIZAÇÃO
 # ==============================================================================
 has_anonymization if {
     perm := data.user_permissions[req.token]
@@ -209,7 +202,7 @@ columnMask := {"expression": "'***'"} if {
 }
 
 # ==============================================================================
-# INFORMAÇÕES DA COLEÇÃO E AUDITORIA (Inalteradas)
+# INFORMAÇÕES DA COLEÇÃO E AUDITORIA
 # ==============================================================================
 required_filters := res if {
     perm := data.user_permissions[req.token]
