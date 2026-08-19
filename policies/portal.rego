@@ -5,7 +5,7 @@ import rego.v1
 # ==============================================================================
 # POLÍTICA UNIFICADA PORTAL + TRINO
 # A verdade sobre os acessos reside EXCLUSIVAMENTE no data.json.
-# Não há usuários hardcoded. Default Deny para tudo.
+# Default Deny para tudo que não for explicitamente permitido.
 # ==============================================================================
 default allow := false
 
@@ -16,11 +16,21 @@ default allow := false
 get_identity := object.get(input, "identity", object.get(object.get(input, "context", {}), "identity", {}))
 get_action := object.get(input, "action", {})
 get_resource := object.get(get_action, "resource", {})
+
+# Extração de objetos aninhados
 get_table := object.get(get_resource, "table", {})
 get_column := object.get(get_resource, "column", {})
+get_catalog_obj := object.get(get_resource, "catalog", {})
 
+# Token/Usuário
 get_token := t if {
     t := object.get(get_identity, "user", object.get(input, "token", ""))
+}
+
+# CORREÇÃO: O Trino envia o catálogo em resource.catalog.catalogName (para AccessCatalog)
+# ou em resource.table.catalogName (para SelectFromColumns). Buscamos em ambos.
+get_catalog := c if {
+    c := object.get(get_catalog_obj, "catalogName", object.get(get_table, "catalogName", ""))
 }
 
 get_colecao := c if {
@@ -74,32 +84,36 @@ infer_tipo_query(op) := "N/A" if {
 
 req := {
     "token": get_token,
+    "catalog": get_catalog,
     "colecao": get_colecao,
     "campo": get_campo,
     "tipo_query": get_tipo_query
 }
 
 # ==============================================================================
-# 1. GATE INICIAL + METADATA (ExecuteQuery, ShowCatalogs, etc.)
+# 1. GATE E METADATA (ExecuteQuery, AccessCatalog, ShowCatalogs, etc.)
+# Se o token é válido no data.json, permitimos listar a estrutura do banco.
+# A proteção real dos dados está na Regra 2 (Acesso a Dados).
 # ==============================================================================
 allow if {
     _ = data.user_permissions[req.token]
-    is_gate_operation
+    is_metadata_operation
 }
 
-is_gate_operation if {
+is_metadata_operation if {
     op := object.get(get_action, "operation", "")
     op in [
         "ExecuteQuery",
-        "ShowCatalogs", "ShowSchemas", "ShowTables", "ShowColumns", "DescribeTable",
-        "AccessCatalog", "AccessSchema"
+        "AccessCatalog", "ShowCatalogs",
+        "AccessSchema", "ShowSchemas", "CreateSchema", "DropSchema",
+        "ShowTables", "ShowColumns", "DescribeTable", "ShowCreate",
+        "ShowFunctions", "ShowSession", "ShowGrants", "ShowRoles",
+        "SetSession", "ResetSession"
     ]
 }
 
 # ==============================================================================
 # 1.5 ACESSO AO INFORMATION_SCHEMA (Necessário para DBeaver e clientes JDBC)
-# Clientes JDBC fazem SELECTs no information_schema para popular a árvore de metadados.
-# Se o token existe no data.json, permitimos ler o information_schema.
 # ==============================================================================
 allow if {
     _ = data.user_permissions[req.token]
@@ -108,7 +122,8 @@ allow if {
 }
 
 # ==============================================================================
-# 2. ACESSO A DADOS (Regra Principal — PROTEGE os dados)
+# 2. ACESSO A DADOS (Regra Principal — PROTEGE os dados reais)
+# Só é avaliada quando o Trino envia uma tabela de negócio específica.
 # ==============================================================================
 allow if {
     perm := data.user_permissions[req.token]
