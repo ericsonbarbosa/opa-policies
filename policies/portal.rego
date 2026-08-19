@@ -11,23 +11,18 @@ default allow := false
 
 # ==============================================================================
 # CAMADA DE NORMALIZAÇÃO DE INPUT (BLINDADA)
-# Extrai os objetos aninhados de forma segura para evitar quebras quando o
-# Trino não envia o objeto "resource" (ex: na operação ExecuteQuery).
 # ==============================================================================
 
-# Extração segura de objetos aninhados
 get_identity := object.get(input, "identity", object.get(object.get(input, "context", {}), "identity", {}))
 get_action := object.get(input, "action", {})
 get_resource := object.get(get_action, "resource", {})
 get_table := object.get(get_resource, "table", {})
 get_column := object.get(get_resource, "column", {})
 
-# Token/Usuário
 get_token := t if {
     t := object.get(get_identity, "user", object.get(input, "token", ""))
 }
 
-# Coleção: prioriza tableName, depois schemaName, depois o campo colecao do Portal
 get_colecao := c if {
     c := object.get(
         get_table,
@@ -36,12 +31,10 @@ get_colecao := c if {
     )
 }
 
-# Campo
 get_campo := f if {
     f := object.get(get_column, "columnName", object.get(input, "campo", ""))
 }
 
-# Tipo de Query: prioriza um tipo_query EXPLÍCITO. Se não houver, infere da operação.
 get_tipo_query := tq if {
     raw := object.get(get_action, "tipo_query", object.get(input, "tipo_query", null))
     raw != null
@@ -56,7 +49,7 @@ get_tipo_query := tq if {
 }
 
 # ==============================================================================
-# HELPER: INFERIR TIPO DE QUERY A PARTIR DA OPERAÇÃO
+# HELPER: INFERIR TIPO DE QUERY
 # ==============================================================================
 infer_tipo_query(op) := "jdbc" if {
     is_string(op)
@@ -79,7 +72,6 @@ infer_tipo_query(op) := "N/A" if {
     not op in ["api", "jdbc", "api_doc", "jdbc_dm"]
 }
 
-# Objeto de requisição padronizado
 req := {
     "token": get_token,
     "colecao": get_colecao,
@@ -102,6 +94,17 @@ is_gate_operation if {
         "ShowCatalogs", "ShowSchemas", "ShowTables", "ShowColumns", "DescribeTable",
         "AccessCatalog", "AccessSchema"
     ]
+}
+
+# ==============================================================================
+# 1.5 ACESSO AO INFORMATION_SCHEMA (Necessário para DBeaver e clientes JDBC)
+# Clientes JDBC fazem SELECTs no information_schema para popular a árvore de metadados.
+# Se o token existe no data.json, permitimos ler o information_schema.
+# ==============================================================================
+allow if {
+    _ = data.user_permissions[req.token]
+    schema := object.get(get_table, "schemaName", "")
+    schema == "information_schema"
 }
 
 # ==============================================================================
