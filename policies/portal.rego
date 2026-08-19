@@ -16,19 +16,14 @@ default allow := false
 get_identity := object.get(input, "identity", object.get(object.get(input, "context", {}), "identity", {}))
 get_action := object.get(input, "action", {})
 get_resource := object.get(get_action, "resource", {})
-
-# Extração de objetos aninhados
 get_table := object.get(get_resource, "table", {})
 get_column := object.get(get_resource, "column", {})
 get_catalog_obj := object.get(get_resource, "catalog", {})
 
-# Token/Usuário
 get_token := t if {
     t := object.get(get_identity, "user", object.get(input, "token", ""))
 }
 
-# CORREÇÃO: O Trino envia o catálogo em resource.catalog.catalogName (para AccessCatalog)
-# ou em resource.table.catalogName (para SelectFromColumns). Buscamos em ambos.
 get_catalog := c if {
     c := object.get(get_catalog_obj, "catalogName", object.get(get_table, "catalogName", ""))
 }
@@ -58,9 +53,6 @@ get_tipo_query := tq if {
     tq := infer_tipo_query(raw)
 }
 
-# ==============================================================================
-# HELPER: INFERIR TIPO DE QUERY
-# ==============================================================================
 infer_tipo_query(op) := "jdbc" if {
     is_string(op)
     regex.match("(?i)^(show|select|describe|use|insert|create|drop|alter|delete|execute)", op)
@@ -91,42 +83,50 @@ req := {
 }
 
 # ==============================================================================
-# 1. GATE E METADATA (ExecuteQuery, AccessCatalog, ShowCatalogs, etc.)
-# Se o token é válido no data.json, permitimos listar a estrutura do banco.
-# A proteção real dos dados está na Regra 2 (Acesso a Dados).
+# DETECÇÃO DE RECURSO DE TABELA (independente do nome da operação)
+# ==============================================================================
+has_table_resource if {
+    t := object.get(get_resource, "table", null)
+    t != null
+    t != {}
+}
+
+# ==============================================================================
+# REGRA 1 — GATE GENÉRICO (nível de catálogo/schema, SEM tabela)
+# Cobre ExecuteQuery, ShowCatalogs, AccessCatalog, ShowSchemas, AccessSchema,
+# ShowTables e qualquer outra operação de navegação que não envolva tabela.
 # ==============================================================================
 allow if {
     _ = data.user_permissions[req.token]
-    is_metadata_operation
-}
-
-is_metadata_operation if {
-    op := object.get(get_action, "operation", "")
-    op in [
-        "ExecuteQuery",
-        "AccessCatalog", "ShowCatalogs",
-        "AccessSchema", "ShowSchemas", "CreateSchema", "DropSchema",
-        "ShowTables", "ShowColumns", "DescribeTable", "ShowCreate",
-        "ShowFunctions", "ShowSession", "ShowGrants", "ShowRoles",
-        "SetSession", "ResetSession"
-    ]
+    not has_table_resource
 }
 
 # ==============================================================================
-# 1.5 ACESSO AO INFORMATION_SCHEMA (Necessário para DBeaver e clientes JDBC)
+# REGRA 1.5 — METADADOS DE SISTEMA / INFORMATION_SCHEMA (com tabela)
+# Necessário para DBeaver e clientes JDBC montarem a árvore de navegação.
 # ==============================================================================
 allow if {
     _ = data.user_permissions[req.token]
-    schema := object.get(get_table, "schemaName", "")
-    schema == "information_schema"
+    has_table_resource
+    is_system_target
+}
+
+is_system_target if {
+    req.catalog in ["system", "memory", "jmx", "tpch", "tpcds", "sys"]
+}
+
+is_system_target if {
+    object.get(get_table, "schemaName", "") == "information_schema"
 }
 
 # ==============================================================================
-# 2. ACESSO A DADOS (Regra Principal — PROTEGE os dados reais)
-# Só é avaliada quando o Trino envia uma tabela de negócio específica.
+# REGRA 2 — ACESSO A DADOS (PROTEGE os dados reais)
+# Só libera com match exato de coleção + campo + tipo_query.
 # ==============================================================================
 allow if {
     perm := data.user_permissions[req.token]
+    has_table_resource
+    not is_system_target
     req.colecao != ""
     perm.nome_colecao == req.colecao
     is_campo_valido(perm, req)
