@@ -11,6 +11,8 @@ default allow := false
 
 # ==============================================================================
 # CAMADA DE NORMALIZAÇÃO DE INPUT (BLINDADA)
+# A "chave" da permissão hoje é o username (u_ericson.nascimento);
+# ontem era UUID/JWT. O Rego não se importa com o formato da identidade.
 # ==============================================================================
 
 get_identity := object.get(input, "identity", object.get(object.get(input, "context", {}), "identity", {}))
@@ -46,6 +48,8 @@ get_tipo_query := tq if {
     tq := raw
 }
 
+# Sem tipo_query explícito no input → infere da operação.
+# Sem tipo_query no data.json → permissão "sem restrição de tipo".
 get_tipo_query := tq if {
     object.get(get_action, "tipo_query", null) == null
     object.get(input, "tipo_query", null) == null
@@ -93,8 +97,6 @@ has_table_resource if {
 
 # ==============================================================================
 # REGRA 1 — GATE GENÉRICO (nível de catálogo/schema, SEM tabela)
-# Cobre ExecuteQuery, ShowCatalogs, AccessCatalog, ShowSchemas, AccessSchema,
-# ShowTables e qualquer outra operação de navegação que não envolva tabela.
 # ==============================================================================
 allow if {
     _ = data.user_permissions[req.token]
@@ -103,7 +105,6 @@ allow if {
 
 # ==============================================================================
 # REGRA 1.5 — METADADOS DE SISTEMA / INFORMATION_SCHEMA (com tabela)
-# Necessário para DBeaver e clientes JDBC montarem a árvore de navegação.
 # ==============================================================================
 allow if {
     _ = data.user_permissions[req.token]
@@ -121,20 +122,21 @@ is_system_target if {
 
 # ==============================================================================
 # REGRA 2 — ACESSO A DADOS (PROTEGE os dados reais)
-# Só libera com match exato de coleção + campo + tipo_query.
+# AJUSTE: comparação de coleção case-insensitive
 # ==============================================================================
 allow if {
     perm := data.user_permissions[req.token]
     has_table_resource
     not is_system_target
     req.colecao != ""
-    perm.nome_colecao == req.colecao
+    lower(perm.nome_colecao) == lower(req.colecao)
     is_campo_valido(perm, req)
     is_tipo_query_valido(perm, req)
 }
 
 # ==============================================================================
 # REGRAS DE VALIDAÇÃO DE CAMPO
+# AJUSTE: case-insensitive (Trino lowercasa identificadores sem aspas)
 # ==============================================================================
 has_campo(r) if {
     _ := r.campo
@@ -146,11 +148,11 @@ is_campo_valido(perm, r) if not has_campo(r)
 
 is_campo_valido(perm, r) if {
     has_campo(r)
-    r.campo in object.get(perm, "campos_permitidos", [])
+    lower(r.campo) in { lower(c) | c in object.get(perm, "campos_permitidos", []) }
 }
 
 # ==============================================================================
-# REGRAS DE VALIDAÇÃO DE TIPO DE QUERY
+# REGRAS DE VALIDAÇÃO DE TIPO DE QUERY (inalteradas)
 # ==============================================================================
 has_req_tq(r) if {
     _ := r.tipo_query
@@ -189,20 +191,23 @@ valida_match_tipo_query(perm_tq, req_tq) if {
 
 # ==============================================================================
 # ANONIMIZAÇÃO (Column Masking)
+# AJUSTE: case-insensitive + guarda is_string (protege contra campo:null)
 # ==============================================================================
 has_anonymization if {
     perm := data.user_permissions[req.token]
-    perm.nome_colecao == req.colecao
+    lower(perm.nome_colecao) == lower(req.colecao)
     some rule in object.get(perm, "anonimizacao", [])
-    rule.campo == req.campo
+    is_string(rule.campo)
+    lower(rule.campo) == lower(req.campo)
     rule.funcao != null
 }
 
 anonymize_rule := rule if {
     perm := data.user_permissions[req.token]
-    perm.nome_colecao == req.colecao
+    lower(perm.nome_colecao) == lower(req.colecao)
     some rule in object.get(perm, "anonimizacao", [])
-    rule.campo == req.campo
+    is_string(rule.campo)
+    lower(rule.campo) == lower(req.campo)
     rule.funcao != null
 }
 
@@ -241,11 +246,11 @@ columnMask := {"expression": "'***'"} if {
 }
 
 # ==============================================================================
-# INFORMAÇÕES DA COLEÇÃO E AUDITORIA
+# INFORMAÇÕES DA COLEÇÃO E AUDITORIA (case-insensitive)
 # ==============================================================================
 required_filters := res if {
     perm := data.user_permissions[req.token]
-    perm.nome_colecao == req.colecao
+    lower(perm.nome_colecao) == lower(req.colecao)
     res := object.get(perm, "filtros", [])
 }
 
@@ -257,7 +262,7 @@ collection_info := {
     "campos_permitidos": object.get(perm, "campos_permitidos", []),
 } if {
     perm := data.user_permissions[req.token]
-    perm.nome_colecao == req.colecao
+    lower(perm.nome_colecao) == lower(req.colecao)
 }
 
 deny contains msg if {
