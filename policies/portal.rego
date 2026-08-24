@@ -1,3 +1,10 @@
+cd ~/opa-policies
+
+# Backup da versão atual (por segurança)
+cp policies/portal.rego policies/portal.rego.bkp.$(date +%Y%m%d_%H%M%S)
+
+# Criar o arquivo do zero com a versão canônica
+cat > policies/portal.rego << 'REGO_EOF'
 package portal.authz
 
 import rego.v1
@@ -11,10 +18,7 @@ default allow := false
 
 # ==============================================================================
 # CAMADA DE NORMALIZAÇÃO DE INPUT (BLINDADA)
-# A "chave" da permissão hoje é o username (u_ericson.nascimento);
-# ontem era UUID/JWT. O Rego não se importa com o formato da identidade.
 # ==============================================================================
-
 get_identity := object.get(input, "identity", object.get(object.get(input, "context", {}), "identity", {}))
 get_action := object.get(input, "action", {})
 get_resource := object.get(get_action, "resource", {})
@@ -48,8 +52,6 @@ get_tipo_query := tq if {
     tq := raw
 }
 
-# Sem tipo_query explícito no input → infere da operação.
-# Sem tipo_query no data.json → permissão "sem restrição de tipo".
 get_tipo_query := tq if {
     object.get(get_action, "tipo_query", null) == null
     object.get(input, "tipo_query", null) == null
@@ -87,7 +89,7 @@ req := {
 }
 
 # ==============================================================================
-# DETECÇÃO DE RECURSO DE TABELA (independente do nome da operação)
+# DETECÇÃO DE RECURSO DE TABELA
 # ==============================================================================
 has_table_resource if {
     t := object.get(get_resource, "table", null)
@@ -96,19 +98,14 @@ has_table_resource if {
 }
 
 # ==============================================================================
-# CONTAS DE SERVIÇO / INFRAESTRUTURA (equivalente ao antigo rules.json)
-# Contas de ETL/administração que NÃO são usuários de negócio do Portal,
-# por isso não vivem no data.json. Mantenha esta lista ENXUTA e auditável.
+# CONTAS DE SERVIÇO / INFRAESTRUTURA
 # ==============================================================================
-
-# hadoop / ingestor / trino: acesso total (ETL e administração)
 service_accounts_full := {"trino", "hadoop", "ingestor"}
 
 allow if {
     req.token in service_accounts_full
 }
 
-# servico: somente leitura (espelha o "read-only" do rules.json)
 service_account_readonly := "servico"
 
 write_ops := {
@@ -129,7 +126,7 @@ allow if {
 }
 
 # ==============================================================================
-# REGRA 1 — GATE GENÉRICO (nível de catálogo/schema, SEM tabela)
+# REGRA 1 — GATE GENÉRICO
 # ==============================================================================
 allow if {
     _ = data.user_permissions[req.token]
@@ -137,7 +134,7 @@ allow if {
 }
 
 # ==============================================================================
-# REGRA 1.5 — METADADOS DE SISTEMA / INFORMATION_SCHEMA (com tabela)
+# REGRA 1.5 — METADADOS DE SISTEMA
 # ==============================================================================
 allow if {
     _ = data.user_permissions[req.token]
@@ -154,8 +151,7 @@ is_system_target if {
 }
 
 # ==============================================================================
-# REGRA 2 — ACESSO A DADOS (PROTEGE os dados reais)
-# AJUSTE: comparação de coleção case-insensitive
+# REGRA 2 — ACESSO A DADOS (case-insensitive)
 # ==============================================================================
 allow if {
     perm := data.user_permissions[req.token]
@@ -168,8 +164,7 @@ allow if {
 }
 
 # ==============================================================================
-# REGRAS DE VALIDAÇÃO DE CAMPO
-# AJUSTE: case-insensitive (Trino lowercasa identificadores sem aspas)
+# REGRAS DE VALIDAÇÃO DE CAMPO (case-insensitive)
 # ==============================================================================
 has_campo(r) if {
     _ := r.campo
@@ -185,7 +180,7 @@ is_campo_valido(perm, r) if {
 }
 
 # ==============================================================================
-# REGRAS DE VALIDAÇÃO DE TIPO DE QUERY (inalteradas)
+# REGRAS DE VALIDAÇÃO DE TIPO DE QUERY
 # ==============================================================================
 has_req_tq(r) if {
     _ := r.tipo_query
@@ -224,7 +219,6 @@ valida_match_tipo_query(perm_tq, req_tq) if {
 
 # ==============================================================================
 # ANONIMIZAÇÃO (Column Masking)
-# AJUSTE: case-insensitive + guarda is_string (protege contra campo:null)
 # ==============================================================================
 has_anonymization if {
     perm := data.user_permissions[req.token]
@@ -279,7 +273,7 @@ columnMask := {"expression": "'***'"} if {
 }
 
 # ==============================================================================
-# INFORMAÇÕES DA COLEÇÃO E AUDITORIA (case-insensitive)
+# INFORMAÇÕES DA COLEÇÃO E AUDITORIA
 # ==============================================================================
 required_filters := res if {
     perm := data.user_permissions[req.token]
@@ -316,3 +310,4 @@ deny contains msg if {
 
 format_token(t) := substring(t, 0, 20) if is_string(t)
 format_token(t) := "INVALID_OR_MISSING" if not is_string(t)
+REGO_EOF
