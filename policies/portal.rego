@@ -96,6 +96,39 @@ has_table_resource if {
 }
 
 # ==============================================================================
+# CONTAS DE SERVIÇO / INFRAESTRUTURA (equivalente ao antigo rules.json)
+# Contas de ETL/administração que NÃO são usuários de negócio do Portal,
+# por isso não vivem no data.json. Mantenha esta lista ENXUTA e auditável.
+# ==============================================================================
+
+# hadoop / ingestor / trino: acesso total (ETL e administração)
+service_accounts_full := {"trino", "hadoop", "ingestor"}
+
+allow if {
+    req.token in service_accounts_full
+}
+
+# servico: somente leitura (espelha o "read-only" do rules.json)
+service_account_readonly := "servico"
+
+write_ops := {
+    "InsertIntoColumns", "InsertIntoTable",
+    "CreateTable", "CreateTableAsSelect", "CreateView", "CreateMaterializedView",
+    "CreateSchema", "DropTable", "DropView", "DropMaterializedView", "DropSchema",
+    "AlterTable", "AlterView", "RenameTable", "RenameColumn", "RenameSchema",
+    "AddColumn", "DropColumn", "DeleteFromTable", "TruncateTable",
+    "CommentTable", "CommentColumn",
+    "Grant", "Deny", "Revoke",
+    "CreateRole", "DropRole", "GrantRoles", "RevokeRoles", "SetRole"
+}
+
+allow if {
+    req.token == service_account_readonly
+    op := object.get(get_action, "operation", "")
+    not op in write_ops
+}
+
+# ==============================================================================
 # REGRA 1 — GATE GENÉRICO (nível de catálogo/schema, SEM tabela)
 # ==============================================================================
 allow if {
