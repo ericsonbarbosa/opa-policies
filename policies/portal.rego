@@ -79,7 +79,7 @@ has_table_resource if {
     t != {}
 }
 
-service_accounts_full := {"trino", "hadoop", "ingestor"}
+service_accounts_full := {"trino", "hadoop", "ingestor", "presto"}
 
 allow if {
     req.token in service_accounts_full
