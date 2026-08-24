@@ -1,24 +1,9 @@
-cd ~/opa-policies
-
-# Backup da versão atual (por segurança)
-cp policies/portal.rego policies/portal.rego.bkp.$(date +%Y%m%d_%H%M%S)
-
-# Criar o arquivo do zero com a versão canônica
-cat > policies/portal.rego << 'REGO_EOF'
 package portal.authz
 
 import rego.v1
 
-# ==============================================================================
-# POLÍTICA UNIFICADA PORTAL + TRINO
-# A verdade sobre os acessos reside EXCLUSIVAMENTE no data.json.
-# Default Deny para tudo que não for explicitamente permitido.
-# ==============================================================================
 default allow := false
 
-# ==============================================================================
-# CAMADA DE NORMALIZAÇÃO DE INPUT (BLINDADA)
-# ==============================================================================
 get_identity := object.get(input, "identity", object.get(object.get(input, "context", {}), "identity", {}))
 get_action := object.get(input, "action", {})
 get_resource := object.get(get_action, "resource", {})
@@ -88,18 +73,12 @@ req := {
     "tipo_query": get_tipo_query
 }
 
-# ==============================================================================
-# DETECÇÃO DE RECURSO DE TABELA
-# ==============================================================================
 has_table_resource if {
     t := object.get(get_resource, "table", null)
     t != null
     t != {}
 }
 
-# ==============================================================================
-# CONTAS DE SERVIÇO / INFRAESTRUTURA
-# ==============================================================================
 service_accounts_full := {"trino", "hadoop", "ingestor"}
 
 allow if {
@@ -125,17 +104,11 @@ allow if {
     not op in write_ops
 }
 
-# ==============================================================================
-# REGRA 1 — GATE GENÉRICO
-# ==============================================================================
 allow if {
     _ = data.user_permissions[req.token]
     not has_table_resource
 }
 
-# ==============================================================================
-# REGRA 1.5 — METADADOS DE SISTEMA
-# ==============================================================================
 allow if {
     _ = data.user_permissions[req.token]
     has_table_resource
@@ -150,9 +123,6 @@ is_system_target if {
     object.get(get_table, "schemaName", "") == "information_schema"
 }
 
-# ==============================================================================
-# REGRA 2 — ACESSO A DADOS (case-insensitive)
-# ==============================================================================
 allow if {
     perm := data.user_permissions[req.token]
     has_table_resource
@@ -163,9 +133,6 @@ allow if {
     is_tipo_query_valido(perm, req)
 }
 
-# ==============================================================================
-# REGRAS DE VALIDAÇÃO DE CAMPO (case-insensitive)
-# ==============================================================================
 has_campo(r) if {
     _ := r.campo
     r.campo != ""
@@ -179,9 +146,6 @@ is_campo_valido(perm, r) if {
     lower(r.campo) in { lower(c) | c in object.get(perm, "campos_permitidos", []) }
 }
 
-# ==============================================================================
-# REGRAS DE VALIDAÇÃO DE TIPO DE QUERY
-# ==============================================================================
 has_req_tq(r) if {
     _ := r.tipo_query
     r.tipo_query != ""
@@ -217,9 +181,6 @@ valida_match_tipo_query(perm_tq, req_tq) if {
     req_tq in perm_tq
 }
 
-# ==============================================================================
-# ANONIMIZAÇÃO (Column Masking)
-# ==============================================================================
 has_anonymization if {
     perm := data.user_permissions[req.token]
     lower(perm.nome_colecao) == lower(req.colecao)
@@ -272,9 +233,6 @@ columnMask := {"expression": "'***'"} if {
     not anonymize_rule.funcao in ["token-sha256", "mascarar-por-completo", "partial-mask", "symbol-replace", "regex-mask"]
 }
 
-# ==============================================================================
-# INFORMAÇÕES DA COLEÇÃO E AUDITORIA
-# ==============================================================================
 required_filters := res if {
     perm := data.user_permissions[req.token]
     lower(perm.nome_colecao) == lower(req.colecao)
@@ -310,4 +268,3 @@ deny contains msg if {
 
 format_token(t) := substring(t, 0, 20) if is_string(t)
 format_token(t) := "INVALID_OR_MISSING" if not is_string(t)
-REGO_EOF
