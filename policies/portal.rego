@@ -141,9 +141,16 @@ has_campo(r) if {
 
 is_campo_valido(perm, r) if not has_campo(r)
 
+# CORREÇÃO: Função auxiliar para comparação case-insensitive de campos
+campo_permitido_ci(perm, campo_req) if {
+    some campo_perm in object.get(perm, "campos_permitidos", [])
+    is_string(campo_perm)
+    lower(campo_perm) == lower(campo_req)
+}
+
 is_campo_valido(perm, r) if {
     has_campo(r)
-    lower(r.campo) in { lower(c) | c in object.get(perm, "campos_permitidos", []) }
+    campo_permitido_ci(perm, r.campo)
 }
 
 has_req_tq(r) if {
