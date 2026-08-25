@@ -2,6 +2,11 @@ package portal.authz
 
 import rego.v1
 
+# ==============================================================================
+# POLÍTICA UNIFICADA PORTAL + TRINO
+# Fonte de verdade: data.json (agora com ARRAY de permissões por usuário).
+# Default Deny para tudo que não for explicitamente permitido.
+# ==============================================================================
 default allow := false
 
 # ==============================================================================
@@ -15,7 +20,7 @@ get_column := object.get(get_resource, "column", {})
 get_catalog_obj := object.get(get_resource, "catalog", {})
 
 get_token := t if {
-    t := object.get(get_identity, "user", object.get(input, "token", ""))
+    t := trim(object.get(get_identity, "user", object.get(input, "token", "")), " ")
 }
 
 get_catalog := c if {
@@ -77,19 +82,41 @@ req := {
 }
 
 # ==============================================================================
-# NOVO: MULTI-PERMISSÃO POR USUÁRIO
-# Aceita valor = objeto (legado) OU array de objetos (novo gerador)
+# FONTE DE PERMISSÕES (tolerante a chave com espaço e ao formato antigo)
 # ==============================================================================
+raw_permissions := p if {
+    p := data.user_permissions
+}
+
+raw_permissions := p if {
+    not data.user_permissions
+    p := data["user_permissions "]
+}
+
+has_permissions(token) if {
+    some k, _ in raw_permissions
+    trim(k, " ") == token
+}
+
+# NOVO formato: array de permissões por usuário
 perms_for(token) := perms if {
-    v := data.user_permissions[token]
+    some k, v in raw_permissions
+    trim(k, " ") == token
     is_array(v)
     perms := v
 }
 
+# LEGADO: objeto único
 perms_for(token) := perms if {
-    v := data.user_permissions[token]
+    some k, v in raw_permissions
+    trim(k, " ") == token
     is_object(v)
     perms := [v]
+}
+
+# Comparação de coleção tolerante a espaço/case
+colecao_match(perm, colecao_req) if {
+    lower(trim(object.get(perm, "nome_colecao", ""), " ")) == lower(colecao_req)
 }
 
 has_table_resource if {
@@ -130,7 +157,7 @@ allow if {
 # REGRA 1 — GATE GENÉRICO
 # ==============================================================================
 allow if {
-    _ = data.user_permissions[req.token]
+    has_permissions(req.token)
     not has_table_resource
 }
 
@@ -138,7 +165,7 @@ allow if {
 # REGRA 1.5 — METADADOS DE SISTEMA
 # ==============================================================================
 allow if {
-    _ = data.user_permissions[req.token]
+    has_permissions(req.token)
     has_table_resource
     is_system_target
 }
@@ -152,20 +179,20 @@ is_system_target if {
 }
 
 # ==============================================================================
-# REGRA 2 — ACESSO A DADOS (agora varre TODAS as permissões do usuário)
+# REGRA 2 — ACESSO A DADOS (varre TODAS as permissões do usuário)
 # ==============================================================================
 allow if {
     some perm in perms_for(req.token)
     has_table_resource
     not is_system_target
     req.colecao != ""
-    lower(perm.nome_colecao) == lower(req.colecao)
+    colecao_match(perm, req.colecao)
     is_campo_valido(perm, req)
     is_tipo_query_valido(perm, req)
 }
 
 # ==============================================================================
-# VALIDAÇÃO DE CAMPO (case-insensitive)
+# VALIDAÇÃO DE CAMPO (case/space-insensitive)
 # ==============================================================================
 has_campo(r) if {
     _ := r.campo
@@ -178,7 +205,7 @@ is_campo_valido(perm, r) if not has_campo(r)
 campo_permitido_ci(perm, campo_req) if {
     some campo_perm in object.get(perm, "campos_permitidos", [])
     is_string(campo_perm)
-    lower(campo_perm) == lower(campo_req)
+    lower(trim(campo_perm, " ")) == lower(campo_req)
 }
 
 is_campo_valido(perm, r) if {
@@ -225,23 +252,23 @@ valida_match_tipo_query(perm_tq, req_tq) if {
 }
 
 # ==============================================================================
-# ANONIMIZAÇÃO (varre todas as permissões)
+# ANONIMIZAÇÃO (Column Masking) — varre todas as permissões
 # ==============================================================================
 has_anonymization if {
     some perm in perms_for(req.token)
-    lower(perm.nome_colecao) == lower(req.colecao)
+    colecao_match(perm, req.colecao)
     some rule in object.get(perm, "anonimizacao", [])
     is_string(rule.campo)
-    lower(rule.campo) == lower(req.campo)
+    lower(trim(rule.campo, " ")) == lower(req.campo)
     rule.funcao != null
 }
 
 anonymize_rule := rule if {
     some perm in perms_for(req.token)
-    lower(perm.nome_colecao) == lower(req.colecao)
+    colecao_match(perm, req.colecao)
     some rule in object.get(perm, "anonimizacao", [])
     is_string(rule.campo)
-    lower(rule.campo) == lower(req.campo)
+    lower(trim(rule.campo, " ")) == lower(req.campo)
     rule.funcao != null
 }
 
@@ -257,6 +284,18 @@ columnMask := {"expression": sprintf("'%s'", [anonymize_rule.simbolo])} if {
 columnMask := {"expression": "'***'"} if {
     anonymize_rule.funcao == "mascarar-por-completo"
     anonymize_rule.simbolo == null
+}
+
+# NOVO: mascarar-inicio (N) → *** + resto a partir de N+1
+columnMask := {"expression": sprintf("concat('***', substring(%s, %d))", [req.campo, to_number(anonymize_rule["indice-regex"]) + 1])} if {
+    anonymize_rule.funcao == "mascarar-inicio"
+    is_number(anonymize_rule["indice-regex"])
+}
+
+# NOVO: mascarar-inicio-fim (N) → mascara N no início e N no fim, preserva o meio
+columnMask := {"expression": sprintf("CASE WHEN length(%s) > %d THEN concat('***', substring(%s, %d, length(%s) - %d), '***') ELSE '***' END", [req.campo, 2 * to_number(anonymize_rule["indice-regex"]), req.campo, to_number(anonymize_rule["indice-regex"]) + 1, req.campo, 2 * to_number(anonymize_rule["indice-regex"])])} if {
+    anonymize_rule.funcao == "mascarar-inicio-fim"
+    is_number(anonymize_rule["indice-regex"])
 }
 
 columnMask := {"expression": sprintf("substring(%s, 1, %d) || '***'", [req.campo, anonymize_rule["indice-regex"]])} if {
@@ -276,7 +315,7 @@ columnMask := {"expression": sprintf("regexp_replace(%s, '%s', '***')", [req.cam
 
 columnMask := {"expression": "'***'"} if {
     has_anonymization
-    not anonymize_rule.funcao in ["token-sha256", "mascarar-por-completo", "partial-mask", "symbol-replace", "regex-mask"]
+    not anonymize_rule.funcao in ["token-sha256", "mascarar-por-completo", "partial-mask", "symbol-replace", "regex-mask", "mascarar-inicio", "mascarar-inicio-fim"]
 }
 
 # ==============================================================================
@@ -284,7 +323,7 @@ columnMask := {"expression": "'***'"} if {
 # ==============================================================================
 required_filters := res if {
     some perm in perms_for(req.token)
-    lower(perm.nome_colecao) == lower(req.colecao)
+    colecao_match(perm, req.colecao)
     res := object.get(perm, "filtros", [])
 }
 
@@ -296,7 +335,7 @@ collection_info := {
     "campos_permitidos": object.get(perm, "campos_permitidos", []),
 } if {
     some perm in perms_for(req.token)
-    lower(perm.nome_colecao) == lower(req.colecao)
+    colecao_match(perm, req.colecao)
 }
 
 deny contains msg if {
