@@ -4,6 +4,9 @@ import rego.v1
 
 default allow := false
 
+# ==============================================================================
+# NORMALIZAÇÃO DE INPUT
+# ==============================================================================
 get_identity := object.get(input, "identity", object.get(object.get(input, "context", {}), "identity", {}))
 get_action := object.get(input, "action", {})
 get_resource := object.get(get_action, "resource", {})
@@ -73,13 +76,32 @@ req := {
     "tipo_query": get_tipo_query
 }
 
+# ==============================================================================
+# NOVO: MULTI-PERMISSÃO POR USUÁRIO
+# Aceita valor = objeto (legado) OU array de objetos (novo gerador)
+# ==============================================================================
+perms_for(token) := perms if {
+    v := data.user_permissions[token]
+    is_array(v)
+    perms := v
+}
+
+perms_for(token) := perms if {
+    v := data.user_permissions[token]
+    is_object(v)
+    perms := [v]
+}
+
 has_table_resource if {
     t := object.get(get_resource, "table", null)
     t != null
     t != {}
 }
 
-service_accounts_full := {"trino", "hadoop", "ingestor", "presto"}
+# ==============================================================================
+# CONTAS DE SERVIÇO
+# ==============================================================================
+service_accounts_full := {"trino", "hadoop", "ingestor"}
 
 allow if {
     req.token in service_accounts_full
@@ -104,11 +126,17 @@ allow if {
     not op in write_ops
 }
 
+# ==============================================================================
+# REGRA 1 — GATE GENÉRICO
+# ==============================================================================
 allow if {
     _ = data.user_permissions[req.token]
     not has_table_resource
 }
 
+# ==============================================================================
+# REGRA 1.5 — METADADOS DE SISTEMA
+# ==============================================================================
 allow if {
     _ = data.user_permissions[req.token]
     has_table_resource
@@ -123,8 +151,11 @@ is_system_target if {
     object.get(get_table, "schemaName", "") == "information_schema"
 }
 
+# ==============================================================================
+# REGRA 2 — ACESSO A DADOS (agora varre TODAS as permissões do usuário)
+# ==============================================================================
 allow if {
-    perm := data.user_permissions[req.token]
+    some perm in perms_for(req.token)
     has_table_resource
     not is_system_target
     req.colecao != ""
@@ -133,6 +164,9 @@ allow if {
     is_tipo_query_valido(perm, req)
 }
 
+# ==============================================================================
+# VALIDAÇÃO DE CAMPO (case-insensitive)
+# ==============================================================================
 has_campo(r) if {
     _ := r.campo
     r.campo != ""
@@ -141,7 +175,6 @@ has_campo(r) if {
 
 is_campo_valido(perm, r) if not has_campo(r)
 
-# CORREÇÃO: Função auxiliar para comparação case-insensitive de campos
 campo_permitido_ci(perm, campo_req) if {
     some campo_perm in object.get(perm, "campos_permitidos", [])
     is_string(campo_perm)
@@ -153,6 +186,9 @@ is_campo_valido(perm, r) if {
     campo_permitido_ci(perm, r.campo)
 }
 
+# ==============================================================================
+# VALIDAÇÃO DE TIPO DE QUERY
+# ==============================================================================
 has_req_tq(r) if {
     _ := r.tipo_query
     r.tipo_query != ""
@@ -188,8 +224,11 @@ valida_match_tipo_query(perm_tq, req_tq) if {
     req_tq in perm_tq
 }
 
+# ==============================================================================
+# ANONIMIZAÇÃO (varre todas as permissões)
+# ==============================================================================
 has_anonymization if {
-    perm := data.user_permissions[req.token]
+    some perm in perms_for(req.token)
     lower(perm.nome_colecao) == lower(req.colecao)
     some rule in object.get(perm, "anonimizacao", [])
     is_string(rule.campo)
@@ -198,7 +237,7 @@ has_anonymization if {
 }
 
 anonymize_rule := rule if {
-    perm := data.user_permissions[req.token]
+    some perm in perms_for(req.token)
     lower(perm.nome_colecao) == lower(req.colecao)
     some rule in object.get(perm, "anonimizacao", [])
     is_string(rule.campo)
@@ -240,8 +279,11 @@ columnMask := {"expression": "'***'"} if {
     not anonymize_rule.funcao in ["token-sha256", "mascarar-por-completo", "partial-mask", "symbol-replace", "regex-mask"]
 }
 
+# ==============================================================================
+# FILTROS E INFO DA COLEÇÃO
+# ==============================================================================
 required_filters := res if {
-    perm := data.user_permissions[req.token]
+    some perm in perms_for(req.token)
     lower(perm.nome_colecao) == lower(req.colecao)
     res := object.get(perm, "filtros", [])
 }
@@ -253,7 +295,7 @@ collection_info := {
     "tipo_campos": object.get(perm, "tipo_campos", "N/A"),
     "campos_permitidos": object.get(perm, "campos_permitidos", []),
 } if {
-    perm := data.user_permissions[req.token]
+    some perm in perms_for(req.token)
     lower(perm.nome_colecao) == lower(req.colecao)
 }
 
