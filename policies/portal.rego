@@ -349,42 +349,47 @@ columnMask := {"expression": sprintf("regexp_replace(%s, '.', '%s')", [req.campo
 }
 
 # --- 3. mascarar-inicio (símbolo + nº casas) ---
-columnMask := {"expression": sprintf("concat(repeat('%s', %d), substring(%s, %d))", [
-    get_simbolo(anonymize_rule),
+# Ex.: ***456.789.00  (mascara as N primeiras casas)
+columnMask := {"expression": sprintf("concat(rpad('', %d, '%s'), substring(%s, %d))", [
     n,
+    sym,
     req.campo,
     n + 1
 ])} if {
     get_funcao(anonymize_rule) == "mascarar-inicio"
     n := get_indice(anonymize_rule)
+    sym := get_simbolo(anonymize_rule)
 }
 
 # --- 4. mascarar-fim (símbolo + nº casas) ---
-columnMask := {"expression": sprintf("concat(substring(%s, 1, length(%s) - %d), repeat('%s', %d))", [
+# Ex.: 000.000.000-***  (mascara as N últimas casas)
+columnMask := {"expression": sprintf("concat(substring(%s, 1, greatest(length(%s) - %d, 0)), rpad('', %d, '%s'))", [
     req.campo,
     req.campo,
     n,
-    get_simbolo(anonymize_rule),
-    n
+    n,
+    sym
 ])} if {
     get_funcao(anonymize_rule) == "mascarar-fim"
     n := get_indice(anonymize_rule)
+    sym := get_simbolo(anonymize_rule)
 }
 
 # --- 5. mascarar-inicio-fim (símbolo + nº casas) ---
-columnMask := {"expression": sprintf("CASE WHEN length(%s) > %d THEN concat(repeat('%s', %d), substring(%s, %d, length(%s) - %d), repeat('%s', %d)) ELSE repeat('%s', length(%s)) END", [
+# Ex.: ***456.789.0***  (mascara N no início e N no fim, preserva o meio)
+columnMask := {"expression": sprintf("CASE WHEN length(%s) > %d THEN concat(rpad('', %d, '%s'), substring(%s, %d, greatest(length(%s) - %d, 0)), rpad('', %d, '%s')) ELSE rpad('', length(%s), '%s') END", [
     req.campo,
     2 * n,
-    sym,
     n,
+    sym,
     req.campo,
     n + 1,
     req.campo,
     2 * n,
-    sym,
     n,
     sym,
-    req.campo
+    req.campo,
+    sym
 ])} if {
     get_funcao(anonymize_rule) == "mascarar-inicio-fim"
     n := get_indice(anonymize_rule)
