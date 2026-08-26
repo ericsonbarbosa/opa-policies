@@ -338,7 +338,8 @@ get_indice(rule) := n if {
 }
 
 # --- 1. token-sha256 (sem parâmetro) ---
-columnMask := {"expression": sprintf("SHA256(CAST(%s AS VARCHAR))", [req.campo])} if {
+# to_utf8: varchar → varbinary | sha256: varbinary → varbinary | to_hex: varbinary → varchar
+columnMask := {"expression": sprintf("to_hex(sha256(to_utf8(%s)))", [req.campo])} if {
     get_funcao(anonymize_rule) == "token-sha256"
 }
 
