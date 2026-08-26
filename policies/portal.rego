@@ -252,7 +252,7 @@ valida_match_tipo_query(perm_tq, req_tq) if {
 }
 
 # ==============================================================================
-# ANONIMIZAÇÃO (Column Masking) — COBERTURA COMPLETA DO PORTAL
+# ANONIMIZAÇÃO (Column Masking) — CORREÇÃO: trim nos valores também
 # ==============================================================================
 has_anonymization if {
     some perm in perms_for(req.token)
@@ -272,121 +272,131 @@ anonymize_rule := rule if {
     rule.funcao != null
 }
 
+# Função auxiliar para extrair valores com trim
+get_funcao(rule) := f if {
+    f := trim(object.get(rule, "funcao", ""), " ")
+}
+
+get_simbolo(rule) := s if {
+    s := trim(object.get(rule, "simbolo", ""), " ")
+}
+
+get_indice(rule) := i if {
+    i := object.get(rule, "indice-regex", null)
+}
+
 # 1. token-sha256 (sem parâmetro)
 columnMask := {"expression": sprintf("SHA256(CAST(%s AS VARCHAR))", [req.campo])} if {
-    anonymize_rule.funcao == "token-sha256"
+    get_funcao(anonymize_rule) == "token-sha256"
 }
 
 # 2. mascarar-por-completo (parâmetro: símbolo)
-columnMask := {"expression": sprintf("regexp_replace(%s, '.', '%s')", [req.campo, anonymize_rule.simbolo])} if {
-    anonymize_rule.funcao == "mascarar-por-completo"
-    anonymize_rule.simbolo != null
+columnMask := {"expression": sprintf("regexp_replace(%s, '.', '%s')", [req.campo, get_simbolo(anonymize_rule)])} if {
+    get_funcao(anonymize_rule) == "mascarar-por-completo"
+    get_simbolo(anonymize_rule) != ""
 }
 
 columnMask := {"expression": "'***'"} if {
-    anonymize_rule.funcao == "mascarar-por-completo"
-    anonymize_rule.simbolo == null
+    get_funcao(anonymize_rule) == "mascarar-por-completo"
+    get_simbolo(anonymize_rule) == ""
 }
 
 # 3. mascarar-inicio (parâmetros: símbolo + nº casas)
-# Exemplo: "1234567890" com indice=2 e simbolo="#" → "##34567890"
 columnMask := {"expression": sprintf("concat(repeat('%s', %d), substring(%s, %d))", [
-    anonymize_rule.simbolo,
-    to_number(anonymize_rule["indice-regex"]),
+    get_simbolo(anonymize_rule),
+    to_number(get_indice(anonymize_rule)),
     req.campo,
-    to_number(anonymize_rule["indice-regex"]) + 1
+    to_number(get_indice(anonymize_rule)) + 1
 ])} if {
-    anonymize_rule.funcao == "mascarar-inicio"
-    anonymize_rule.simbolo != null
-    is_number(anonymize_rule["indice-regex"])
+    get_funcao(anonymize_rule) == "mascarar-inicio"
+    get_simbolo(anonymize_rule) != ""
+    is_number(get_indice(anonymize_rule))
 }
 
-columnMask := {"expression": sprintf("concat('***', substring(%s, %d))", [req.campo, to_number(anonymize_rule["indice-regex"]) + 1])} if {
-    anonymize_rule.funcao == "mascarar-inicio"
-    anonymize_rule.simbolo == null
-    is_number(anonymize_rule["indice-regex"])
+columnMask := {"expression": sprintf("concat('***', substring(%s, %d))", [req.campo, to_number(get_indice(anonymize_rule)) + 1])} if {
+    get_funcao(anonymize_rule) == "mascarar-inicio"
+    get_simbolo(anonymize_rule) == ""
+    is_number(get_indice(anonymize_rule))
 }
 
-# 4. mascarar-fim (parâmetros: símbolo + nº casas) — NOVO
-# Exemplo: "1234567890" com indice=2 e simbolo="#" → "12345678##"
+# 4. mascarar-fim (parâmetros: símbolo + nº casas)
 columnMask := {"expression": sprintf("concat(substring(%s, 1, length(%s) - %d), repeat('%s', %d))", [
     req.campo,
     req.campo,
-    to_number(anonymize_rule["indice-regex"]),
-    anonymize_rule.simbolo,
-    to_number(anonymize_rule["indice-regex"])
+    to_number(get_indice(anonymize_rule)),
+    get_simbolo(anonymize_rule),
+    to_number(get_indice(anonymize_rule))
 ])} if {
-    anonymize_rule.funcao == "mascarar-fim"
-    anonymize_rule.simbolo != null
-    is_number(anonymize_rule["indice-regex"])
+    get_funcao(anonymize_rule) == "mascarar-fim"
+    get_simbolo(anonymize_rule) != ""
+    is_number(get_indice(anonymize_rule))
 }
 
 columnMask := {"expression": sprintf("concat(substring(%s, 1, length(%s) - %d), '***')", [
     req.campo,
     req.campo,
-    to_number(anonymize_rule["indice-regex"])
+    to_number(get_indice(anonymize_rule))
 ])} if {
-    anonymize_rule.funcao == "mascarar-fim"
-    anonymize_rule.simbolo == null
-    is_number(anonymize_rule["indice-regex"])
+    get_funcao(anonymize_rule) == "mascarar-fim"
+    get_simbolo(anonymize_rule) == ""
+    is_number(get_indice(anonymize_rule))
 }
 
 # 5. mascarar-inicio-fim (parâmetros: símbolo + nº casas)
-# Exemplo: "1234567890" com indice=2 e simbolo="#" → "##345678##"
 columnMask := {"expression": sprintf("CASE WHEN length(%s) > %d THEN concat(repeat('%s', %d), substring(%s, %d, length(%s) - %d), repeat('%s', %d)) ELSE repeat('%s', length(%s)) END", [
     req.campo,
-    2 * to_number(anonymize_rule["indice-regex"]),
-    anonymize_rule.simbolo,
-    to_number(anonymize_rule["indice-regex"]),
+    2 * to_number(get_indice(anonymize_rule)),
+    get_simbolo(anonymize_rule),
+    to_number(get_indice(anonymize_rule)),
     req.campo,
-    to_number(anonymize_rule["indice-regex"]) + 1,
+    to_number(get_indice(anonymize_rule)) + 1,
     req.campo,
-    2 * to_number(anonymize_rule["indice-regex"]),
-    anonymize_rule.simbolo,
-    to_number(anonymize_rule["indice-regex"]),
-    anonymize_rule.simbolo,
+    2 * to_number(get_indice(anonymize_rule)),
+    get_simbolo(anonymize_rule),
+    to_number(get_indice(anonymize_rule)),
+    get_simbolo(anonymize_rule),
     req.campo
 ])} if {
-    anonymize_rule.funcao == "mascarar-inicio-fim"
-    anonymize_rule.simbolo != null
-    is_number(anonymize_rule["indice-regex"])
+    get_funcao(anonymize_rule) == "mascarar-inicio-fim"
+    get_simbolo(anonymize_rule) != ""
+    is_number(get_indice(anonymize_rule))
 }
 
 columnMask := {"expression": sprintf("CASE WHEN length(%s) > %d THEN concat('***', substring(%s, %d, length(%s) - %d), '***') ELSE '***' END", [
     req.campo,
-    2 * to_number(anonymize_rule["indice-regex"]),
+    2 * to_number(get_indice(anonymize_rule)),
     req.campo,
-    to_number(anonymize_rule["indice-regex"]) + 1,
+    to_number(get_indice(anonymize_rule)) + 1,
     req.campo,
-    2 * to_number(anonymize_rule["indice-regex"])
+    2 * to_number(get_indice(anonymize_rule))
 ])} if {
-    anonymize_rule.funcao == "mascarar-inicio-fim"
-    anonymize_rule.simbolo == null
-    is_number(anonymize_rule["indice-regex"])
+    get_funcao(anonymize_rule) == "mascarar-inicio-fim"
+    get_simbolo(anonymize_rule) == ""
+    is_number(get_indice(anonymize_rule))
 }
 
-# 6. partial-mask (legado — usa o indice como número de caracteres a preservar no início)
-columnMask := {"expression": sprintf("substring(%s, 1, %d) || '***'", [req.campo, anonymize_rule["indice-regex"]])} if {
-    anonymize_rule.funcao == "partial-mask"
-    anonymize_rule["indice-regex"] != null
+# 6. partial-mask (legado)
+columnMask := {"expression": sprintf("substring(%s, 1, %d) || '***'", [req.campo, get_indice(anonymize_rule)])} if {
+    get_funcao(anonymize_rule) == "partial-mask"
+    get_indice(anonymize_rule) != null
 }
 
-# 7. symbol-replace (legado — substitui tudo por um símbolo fixo)
-columnMask := {"expression": sprintf("'%s'", [anonymize_rule.simbolo])} if {
-    anonymize_rule.funcao == "symbol-replace"
-    anonymize_rule.simbolo != null
+# 7. symbol-replace (legado)
+columnMask := {"expression": sprintf("'%s'", [get_simbolo(anonymize_rule)])} if {
+    get_funcao(anonymize_rule) == "symbol-replace"
+    get_simbolo(anonymize_rule) != ""
 }
 
-# 8. regex-mask (legado — usa regex para substituir)
-columnMask := {"expression": sprintf("regexp_replace(%s, '%s', '***')", [req.campo, anonymize_rule["indice-regex"]])} if {
-    anonymize_rule.funcao == "regex-mask"
-    anonymize_rule["indice-regex"] != null
+# 8. regex-mask (legado)
+columnMask := {"expression": sprintf("regexp_replace(%s, '%s', '***')", [req.campo, get_indice(anonymize_rule)])} if {
+    get_funcao(anonymize_rule) == "regex-mask"
+    get_indice(anonymize_rule) != null
 }
 
 # Fallback genérico
 columnMask := {"expression": "'***'"} if {
     has_anonymization
-    not anonymize_rule.funcao in ["token-sha256", "mascarar-por-completo", "partial-mask", "symbol-replace", "regex-mask", "mascarar-inicio", "mascarar-fim", "mascarar-inicio-fim"]
+    not get_funcao(anonymize_rule) in ["token-sha256", "mascarar-por-completo", "partial-mask", "symbol-replace", "regex-mask", "mascarar-inicio", "mascarar-fim", "mascarar-inicio-fim"]
 }
 
 # ==============================================================================
