@@ -51,8 +51,8 @@ get_campo := f if {
     f := object.get(get_column, "columnName", object.get(input, "campo", ""))
 }
 
-# SelectFromColumns real do Trino: colunas vêm num array
-get_columns := object.get(get_resource, "columns", [])
+# SelectFromColumns real do Trino: colunas vêm num array DENTRO de resource.table
+get_columns := object.get(get_table, "columns", object.get(get_resource, "columns", []))
 
 has_columns if {
     count(get_columns) > 0
