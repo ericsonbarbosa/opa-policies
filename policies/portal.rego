@@ -4,18 +4,30 @@ import rego.v1
 
 # ==============================================================================
 # POLÍTICA UNIFICADA PORTAL + TRINO
-# Fonte de verdade: data.json (agora com ARRAY de permissões por usuário).
+# A verdade sobre os acessos reside EXCLUSIVAMENTE no data.json.
 # Default Deny para tudo que não for explicitamente permitido.
 # ==============================================================================
 default allow := false
 
 # ==============================================================================
-# NORMALIZAÇÃO DE INPUT
+# CAMADA DE NORMALIZAÇÃO DE INPUT (BLINDADA)
 # ==============================================================================
 get_identity := object.get(input, "identity", object.get(object.get(input, "context", {}), "identity", {}))
 get_action := object.get(input, "action", {})
 get_resource := object.get(get_action, "resource", {})
-get_table := object.get(get_resource, "table", {})
+
+# Allow: tabela vem em resource.table
+get_table := t if {
+    t := object.get(get_resource, "table", {})
+    t != {}
+}
+
+# GetColumnMask: o Trino embute catalog/schema/table DENTRO de resource.column
+get_table := t if {
+    object.get(get_resource, "table", {}) == {}
+    t := object.get(get_resource, "column", {})
+}
+
 get_column := object.get(get_resource, "column", {})
 get_catalog_obj := object.get(get_resource, "catalog", {})
 
@@ -37,6 +49,13 @@ get_colecao := c if {
 
 get_campo := f if {
     f := object.get(get_column, "columnName", object.get(input, "campo", ""))
+}
+
+# SelectFromColumns real do Trino: colunas vêm num array
+get_columns := object.get(get_resource, "columns", [])
+
+has_columns if {
+    count(get_columns) > 0
 }
 
 get_tipo_query := tq if {
@@ -116,7 +135,7 @@ perms_for(token) := perms if {
 
 # Comparação de coleção tolerante a espaço/case
 colecao_match(perm, colecao_req) if {
-    lower(trim(object.get(perm, "nome_colecao", ""), " ")) == lower(colecao_req)
+    lower(trim(object.get(perm, "nome_colecao", ""), " ")) == lower(trim(colecao_req, " "))
 }
 
 has_table_resource if {
@@ -126,7 +145,7 @@ has_table_resource if {
 }
 
 # ==============================================================================
-# CONTAS DE SERVIÇO
+# CONTAS DE SERVIÇO / INFRAESTRUTURA
 # ==============================================================================
 service_accounts_full := {"trino", "hadoop", "ingestor"}
 
@@ -154,7 +173,7 @@ allow if {
 }
 
 # ==============================================================================
-# REGRA 1 — GATE GENÉRICO
+# REGRA 1 — GATE GENÉRICO (nível de catálogo/schema, SEM tabela)
 # ==============================================================================
 allow if {
     has_permissions(req.token)
@@ -162,7 +181,7 @@ allow if {
 }
 
 # ==============================================================================
-# REGRA 1.5 — METADADOS DE SISTEMA
+# REGRA 1.5 — METADADOS DE SISTEMA / INFORMATION_SCHEMA (com tabela)
 # ==============================================================================
 allow if {
     has_permissions(req.token)
@@ -192,7 +211,7 @@ allow if {
 }
 
 # ==============================================================================
-# VALIDAÇÃO DE CAMPO (case/space-insensitive)
+# VALIDAÇÃO DE CAMPO (case/space-insensitive + array columns do Trino)
 # ==============================================================================
 has_campo(r) if {
     _ := r.campo
@@ -200,14 +219,28 @@ has_campo(r) if {
     r.campo != null
 }
 
-is_campo_valido(perm, r) if not has_campo(r)
-
 campo_permitido_ci(perm, campo_req) if {
     some campo_perm in object.get(perm, "campos_permitidos", [])
     is_string(campo_perm)
-    lower(trim(campo_perm, " ")) == lower(campo_req)
+    lower(trim(campo_perm, " ")) == lower(trim(campo_req, " "))
 }
 
+# Sem coluna nem array (metadados, SHOW, etc.) → libera
+is_campo_valido(perm, r) if {
+    not has_campo(r)
+    not has_columns
+}
+
+# SelectFromColumns real do Trino: valida CADA coluna do array
+is_campo_valido(perm, r) if {
+    not has_campo(r)
+    has_columns
+    every c in get_columns {
+        campo_permitido_ci(perm, c)
+    }
+}
+
+# Formato de curl/legado (column.columnName)
 is_campo_valido(perm, r) if {
     has_campo(r)
     campo_permitido_ci(perm, r.campo)
@@ -243,7 +276,7 @@ is_tipo_query_valido(perm, r) if {
 
 valida_match_tipo_query(perm_tq, req_tq) if {
     is_string(perm_tq)
-    perm_tq == req_tq
+    trim(perm_tq, " ") == req_tq
 }
 
 valida_match_tipo_query(perm_tq, req_tq) if {
@@ -252,7 +285,7 @@ valida_match_tipo_query(perm_tq, req_tq) if {
 }
 
 # ==============================================================================
-# ANONIMIZAÇÃO (Column Masking) — CORREÇÃO: trim nos valores também
+# ANONIMIZAÇÃO (Column Masking) — varre todas as permissões
 # ==============================================================================
 has_anonymization if {
     some perm in perms_for(req.token)
@@ -260,7 +293,7 @@ has_anonymization if {
     some rule in object.get(perm, "anonimizacao", [])
     is_string(rule.campo)
     lower(trim(rule.campo, " ")) == lower(req.campo)
-    rule.funcao != null
+    get_funcao(rule) != ""
 }
 
 anonymize_rule := rule if {
@@ -269,134 +302,115 @@ anonymize_rule := rule if {
     some rule in object.get(perm, "anonimizacao", [])
     is_string(rule.campo)
     lower(trim(rule.campo, " ")) == lower(req.campo)
-    rule.funcao != null
+    get_funcao(rule) != ""
 }
 
-# Função auxiliar para extrair valores com trim
+# --- Helpers de leitura tolerantes a espaço/null ---
 get_funcao(rule) := f if {
-    f := trim(object.get(rule, "funcao", ""), " ")
+    raw := object.get(rule, "funcao", "")
+    is_string(raw)
+    f := trim(raw, " ")
 }
 
 get_simbolo(rule) := s if {
-    s := trim(object.get(rule, "simbolo", ""), " ")
+    raw := object.get(rule, "simbolo", "")
+    is_string(raw)
+    t := trim(raw, " ")
+    t != ""
+    s := t
 }
 
-get_indice(rule) := i if {
-    i := object.get(rule, "indice-regex", null)
+get_simbolo(rule) := "*" if {
+    raw := object.get(rule, "simbolo", "")
+    is_string(raw)
+    trim(raw, " ") == ""
 }
 
-# 1. token-sha256 (sem parâmetro)
+get_simbolo(rule) := "*" if {
+    raw := object.get(rule, "simbolo", "")
+    not is_string(raw)
+}
+
+get_indice(rule) := n if {
+    raw := object.get(rule, "indice-regex", null)
+    is_number(raw)
+    n := raw
+}
+
+# --- 1. token-sha256 (sem parâmetro) ---
 columnMask := {"expression": sprintf("SHA256(CAST(%s AS VARCHAR))", [req.campo])} if {
     get_funcao(anonymize_rule) == "token-sha256"
 }
 
-# 2. mascarar-por-completo (parâmetro: símbolo)
+# --- 2. mascarar-por-completo (parâmetro: símbolo) ---
 columnMask := {"expression": sprintf("regexp_replace(%s, '.', '%s')", [req.campo, get_simbolo(anonymize_rule)])} if {
     get_funcao(anonymize_rule) == "mascarar-por-completo"
-    get_simbolo(anonymize_rule) != ""
 }
 
-columnMask := {"expression": "'***'"} if {
-    get_funcao(anonymize_rule) == "mascarar-por-completo"
-    get_simbolo(anonymize_rule) == ""
-}
-
-# 3. mascarar-inicio (parâmetros: símbolo + nº casas)
+# --- 3. mascarar-inicio (símbolo + nº casas) ---
 columnMask := {"expression": sprintf("concat(repeat('%s', %d), substring(%s, %d))", [
     get_simbolo(anonymize_rule),
-    to_number(get_indice(anonymize_rule)),
+    n,
     req.campo,
-    to_number(get_indice(anonymize_rule)) + 1
+    n + 1
 ])} if {
     get_funcao(anonymize_rule) == "mascarar-inicio"
-    get_simbolo(anonymize_rule) != ""
-    is_number(get_indice(anonymize_rule))
+    n := get_indice(anonymize_rule)
 }
 
-columnMask := {"expression": sprintf("concat('***', substring(%s, %d))", [req.campo, to_number(get_indice(anonymize_rule)) + 1])} if {
-    get_funcao(anonymize_rule) == "mascarar-inicio"
-    get_simbolo(anonymize_rule) == ""
-    is_number(get_indice(anonymize_rule))
-}
-
-# 4. mascarar-fim (parâmetros: símbolo + nº casas)
+# --- 4. mascarar-fim (símbolo + nº casas) ---
 columnMask := {"expression": sprintf("concat(substring(%s, 1, length(%s) - %d), repeat('%s', %d))", [
     req.campo,
     req.campo,
-    to_number(get_indice(anonymize_rule)),
+    n,
     get_simbolo(anonymize_rule),
-    to_number(get_indice(anonymize_rule))
+    n
 ])} if {
     get_funcao(anonymize_rule) == "mascarar-fim"
-    get_simbolo(anonymize_rule) != ""
-    is_number(get_indice(anonymize_rule))
+    n := get_indice(anonymize_rule)
 }
 
-columnMask := {"expression": sprintf("concat(substring(%s, 1, length(%s) - %d), '***')", [
-    req.campo,
-    req.campo,
-    to_number(get_indice(anonymize_rule))
-])} if {
-    get_funcao(anonymize_rule) == "mascarar-fim"
-    get_simbolo(anonymize_rule) == ""
-    is_number(get_indice(anonymize_rule))
-}
-
-# 5. mascarar-inicio-fim (parâmetros: símbolo + nº casas)
+# --- 5. mascarar-inicio-fim (símbolo + nº casas) ---
 columnMask := {"expression": sprintf("CASE WHEN length(%s) > %d THEN concat(repeat('%s', %d), substring(%s, %d, length(%s) - %d), repeat('%s', %d)) ELSE repeat('%s', length(%s)) END", [
     req.campo,
-    2 * to_number(get_indice(anonymize_rule)),
-    get_simbolo(anonymize_rule),
-    to_number(get_indice(anonymize_rule)),
+    2 * n,
+    sym,
+    n,
     req.campo,
-    to_number(get_indice(anonymize_rule)) + 1,
+    n + 1,
     req.campo,
-    2 * to_number(get_indice(anonymize_rule)),
-    get_simbolo(anonymize_rule),
-    to_number(get_indice(anonymize_rule)),
-    get_simbolo(anonymize_rule),
+    2 * n,
+    sym,
+    n,
+    sym,
     req.campo
 ])} if {
     get_funcao(anonymize_rule) == "mascarar-inicio-fim"
-    get_simbolo(anonymize_rule) != ""
-    is_number(get_indice(anonymize_rule))
+    n := get_indice(anonymize_rule)
+    sym := get_simbolo(anonymize_rule)
 }
 
-columnMask := {"expression": sprintf("CASE WHEN length(%s) > %d THEN concat('***', substring(%s, %d, length(%s) - %d), '***') ELSE '***' END", [
-    req.campo,
-    2 * to_number(get_indice(anonymize_rule)),
-    req.campo,
-    to_number(get_indice(anonymize_rule)) + 1,
-    req.campo,
-    2 * to_number(get_indice(anonymize_rule))
-])} if {
-    get_funcao(anonymize_rule) == "mascarar-inicio-fim"
-    get_simbolo(anonymize_rule) == ""
-    is_number(get_indice(anonymize_rule))
-}
-
-# 6. partial-mask (legado)
-columnMask := {"expression": sprintf("substring(%s, 1, %d) || '***'", [req.campo, get_indice(anonymize_rule)])} if {
+# --- Legado: partial-mask ---
+columnMask := {"expression": sprintf("substring(%s, 1, %d) || '***'", [req.campo, anonymize_rule["indice-regex"]])} if {
     get_funcao(anonymize_rule) == "partial-mask"
-    get_indice(anonymize_rule) != null
+    is_number(anonymize_rule["indice-regex"])
 }
 
-# 7. symbol-replace (legado)
+# --- Legado: symbol-replace ---
 columnMask := {"expression": sprintf("'%s'", [get_simbolo(anonymize_rule)])} if {
     get_funcao(anonymize_rule) == "symbol-replace"
-    get_simbolo(anonymize_rule) != ""
 }
 
-# 8. regex-mask (legado)
-columnMask := {"expression": sprintf("regexp_replace(%s, '%s', '***')", [req.campo, get_indice(anonymize_rule)])} if {
+# --- Legado: regex-mask ---
+columnMask := {"expression": sprintf("regexp_replace(%s, '%s', '***')", [req.campo, anonymize_rule["indice-regex"]])} if {
     get_funcao(anonymize_rule) == "regex-mask"
-    get_indice(anonymize_rule) != null
+    is_string(anonymize_rule["indice-regex"])
 }
 
-# Fallback genérico
+# --- Fallback genérico ---
 columnMask := {"expression": "'***'"} if {
     has_anonymization
-    not get_funcao(anonymize_rule) in ["token-sha256", "mascarar-por-completo", "partial-mask", "symbol-replace", "regex-mask", "mascarar-inicio", "mascarar-fim", "mascarar-inicio-fim"]
+    not get_funcao(anonymize_rule) in ["token-sha256", "mascarar-por-completo", "mascarar-inicio", "mascarar-fim", "mascarar-inicio-fim", "partial-mask", "symbol-replace", "regex-mask"]
 }
 
 # ==============================================================================
