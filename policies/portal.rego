@@ -173,6 +173,67 @@ allow if {
 }
 
 # ==============================================================================
+# CONTROLE TEMPORAL (JANELA DE HORÁRIO + DATA DE VALIDADE)
+# Campos do data.json (ISO 8601):
+#   "horario_inicio" / "horario_fim" → janela de acesso
+#   "limitar_acesso": true  → modo SOFT (fora da janela libera; e-mail fica
+#                             por conta da camada de serviço / access_alert)
+#   "limitar_acesso": false → modo HARD (fora da janela = bloqueio)
+#   "data_validade"         → após esta data = bloqueio duro sempre
+# ==============================================================================
+now_ns := time.now_ns()
+
+parse_ts(raw) := ns if {
+    is_string(raw)
+    trim(raw, " ") != ""
+    ns := time.parse_rfc3339_ns(trim(raw, " "))
+}
+
+perm_vencida(perm) if {
+    ns := parse_ts(object.get(perm, "data_validade", null))
+    now_ns >= ns
+}
+
+perm_fora_janela(perm) if {
+    ini := parse_ts(object.get(perm, "horario_inicio", null))
+    fim := parse_ts(object.get(perm, "horario_fim", null))
+    not (now_ns >= ini and now_ns <= fim)
+}
+
+# limitar_acesso == true → modo soft
+limitar_acesso_soft(perm) if {
+    object.get(perm, "limitar_acesso", null) == true
+}
+
+limitar_acesso_soft(perm) if {
+    raw := object.get(perm, "limitar_acesso", "")
+    is_string(raw)
+    lower(trim(raw, " ")) == "true"
+}
+
+# Bloqueio duro: fora da janela E modo hard (flag false/ausente)
+perm_bloqueio_tempo(perm) if {
+    perm_fora_janela(perm)
+    not limitar_acesso_soft(perm)
+}
+
+is_tempo_valido(perm) if {
+    not perm_vencida(perm)
+    not perm_bloqueio_tempo(perm)
+}
+
+# INFORMATIVO (não afeta o allow): camada de serviço pode consultar este
+# endpoint para disparar o e-mail de "acesso fora do horário" (modo soft).
+access_alert contains msg if {
+    some perm in perms_for(req.token)
+    colecao_match(perm, req.colecao)
+    not perm_vencida(perm)
+    perm_fora_janela(perm)
+    limitar_acesso_soft(perm)
+    msg := sprintf("OUT_OF_HOURS: user=%s colecao=%s", [req.token, req.colecao])
+}
+
+# ==============================================================================
 # REGRA 1 — GATE GENÉRICO (nível de catálogo/schema, SEM tabela)
 # ==============================================================================
 allow if {
@@ -208,6 +269,7 @@ allow if {
     colecao_match(perm, req.colecao)
     is_campo_valido(perm, req)
     is_tipo_query_valido(perm, req)
+    is_tempo_valido(perm)
 }
 
 # ==============================================================================
@@ -338,7 +400,6 @@ get_indice(rule) := n if {
 }
 
 # --- 1. token-sha256 (sem parâmetro) ---
-# to_utf8: varchar → varbinary | sha256: varbinary → varbinary | to_hex: varbinary → varchar
 columnMask := {"expression": sprintf("to_hex(sha256(to_utf8(%s)))", [req.campo])} if {
     get_funcao(anonymize_rule) == "token-sha256"
 }
@@ -349,7 +410,6 @@ columnMask := {"expression": sprintf("regexp_replace(%s, '.', '%s')", [req.campo
 }
 
 # --- 3. mascarar-inicio (símbolo + nº casas) ---
-# Ex.: ***456.789.00  (mascara as N primeiras casas)
 columnMask := {"expression": sprintf("concat(rpad('', %d, '%s'), substring(%s, %d))", [
     n,
     sym,
@@ -362,7 +422,6 @@ columnMask := {"expression": sprintf("concat(rpad('', %d, '%s'), substring(%s, %
 }
 
 # --- 4. mascarar-fim (símbolo + nº casas) ---
-# Ex.: 000.000.000-***  (mascara as N últimas casas)
 columnMask := {"expression": sprintf("concat(substring(%s, 1, greatest(length(%s) - %d, 0)), rpad('', %d, '%s'))", [
     req.campo,
     req.campo,
@@ -376,7 +435,6 @@ columnMask := {"expression": sprintf("concat(substring(%s, 1, greatest(length(%s
 }
 
 # --- 5. mascarar-inicio-fim (símbolo + nº casas) ---
-# Ex.: ***456.789.0***  (mascara N no início e N no fim, preserva o meio)
 columnMask := {"expression": sprintf("CASE WHEN length(%s) > %d THEN concat(rpad('', %d, '%s'), substring(%s, %d, greatest(length(%s) - %d, 0)), rpad('', %d, '%s')) ELSE rpad('', length(%s), '%s') END", [
     req.campo,
     2 * n,
