@@ -2,9 +2,6 @@ package portal.authz
 
 import rego.v1
 
-# ==============================================================================
-# POLÍTICA UNIFICADA PORTAL + TRINO — Default Deny
-# ==============================================================================
 default allow := false
 
 # ==============================================================================
@@ -14,13 +11,11 @@ get_identity := object.get(input, "identity", object.get(object.get(input, "cont
 get_action := object.get(input, "action", {})
 get_resource := object.get(get_action, "resource", {})
 
-# Allow: tabela vem em resource.table
 get_table := t if {
     t := object.get(get_resource, "table", {})
     t != {}
 }
 
-# GetColumnMask: o Trino embute catalog/schema/table DENTRO de resource.column
 get_table := t if {
     object.get(get_resource, "table", {}) == {}
     t := object.get(get_resource, "column", {})
@@ -49,7 +44,6 @@ get_campo := f if {
     f := object.get(get_column, "columnName", object.get(input, "campo", ""))
 }
 
-# SelectFromColumns real do Trino: colunas vêm num array DENTRO de resource.table
 get_columns := object.get(get_table, "columns", object.get(get_resource, "columns", []))
 
 has_columns if {
@@ -99,7 +93,7 @@ req := {
 }
 
 # ==============================================================================
-# FONTE DE PERMISSÕES (array por usuário + legado + tolerância a espaços)
+# FONTE DE PERMISSÕES (array por usuário + tolerância a espaços)
 # ==============================================================================
 raw_permissions := p if {
     p := data.user_permissions
@@ -141,8 +135,8 @@ has_table_resource if {
 
 # ==============================================================================
 # CONTROLE TEMPORAL (janela ISO 8601 + validade)
-# limitar_acesso=true  → SOFT: fora da janela libera (e-mail fica c/ a outra camada)
-# limitar_acesso=false → HARD: fora da janela bloqueia
+# limitar_acesso=true  → SOFT (fora libera; e-mail é da outra camada)
+# limitar_acesso=false → HARD (fora bloqueia)
 # data_validade vencida → bloqueio duro sempre
 # campos null/ausentes/vazios → sem restrição
 # ==============================================================================
@@ -159,10 +153,15 @@ perm_vencida(perm) if {
     now_ns >= ns
 }
 
+# "fora da janela" quebrado em duas regras (OPA v1 não aceita `and` dentro de `not (...)`)
 perm_fora_janela(perm) if {
     ini := parse_ts(object.get(perm, "horario_inicio", null))
+    now_ns < ini
+}
+
+perm_fora_janela(perm) if {
     fim := parse_ts(object.get(perm, "horario_fim", null))
-    not (now_ns >= ini and now_ns <= fim)
+    now_ns > fim
 }
 
 limitar_acesso_soft(perm) if {
@@ -185,7 +184,7 @@ is_tempo_valido(perm) if {
     not perm_bloqueio_tempo(perm)
 }
 
-# Informativo (não afeta allow): camada de serviço pode consultar p/ disparar e-mail
+# Informativo (não afeta allow): camada de serviço consulta p/ disparar e-mail
 access_alert contains msg if {
     some perm in perms_for(req.token)
     colecao_match(perm, req.colecao)
@@ -385,17 +384,14 @@ get_indice(rule) := n if {
     n := raw
 }
 
-# 1. token-sha256
 columnMask := {"expression": sprintf("to_hex(sha256(to_utf8(%s)))", [req.campo])} if {
     get_funcao(anonymize_rule) == "token-sha256"
 }
 
-# 2. mascarar-por-completo
 columnMask := {"expression": sprintf("regexp_replace(%s, '.', '%s')", [req.campo, get_simbolo(anonymize_rule)])} if {
     get_funcao(anonymize_rule) == "mascarar-por-completo"
 }
 
-# 3. mascarar-inicio
 columnMask := {"expression": sprintf("concat(rpad('', %d, '%s'), substring(%s, %d))", [
     n, sym, req.campo, n + 1
 ])} if {
@@ -404,7 +400,6 @@ columnMask := {"expression": sprintf("concat(rpad('', %d, '%s'), substring(%s, %
     sym := get_simbolo(anonymize_rule)
 }
 
-# 4. mascarar-fim
 columnMask := {"expression": sprintf("concat(substring(%s, 1, greatest(length(%s) - %d, 0)), rpad('', %d, '%s'))", [
     req.campo, req.campo, n, n, sym
 ])} if {
@@ -413,7 +408,6 @@ columnMask := {"expression": sprintf("concat(substring(%s, 1, greatest(length(%s
     sym := get_simbolo(anonymize_rule)
 }
 
-# 5. mascarar-inicio-fim
 columnMask := {"expression": sprintf("CASE WHEN length(%s) > %d THEN concat(rpad('', %d, '%s'), substring(%s, %d, greatest(length(%s) - %d, 0)), rpad('', %d, '%s')) ELSE rpad('', length(%s), '%s') END", [
     req.campo, 2 * n, n, sym, req.campo, n + 1, req.campo, 2 * n, n, sym, req.campo, sym
 ])} if {
@@ -422,7 +416,6 @@ columnMask := {"expression": sprintf("CASE WHEN length(%s) > %d THEN concat(rpad
     sym := get_simbolo(anonymize_rule)
 }
 
-# Legados
 columnMask := {"expression": sprintf("substring(%s, 1, %d) || '***'", [req.campo, anonymize_rule["indice-regex"]])} if {
     get_funcao(anonymize_rule) == "partial-mask"
     is_number(anonymize_rule["indice-regex"])
