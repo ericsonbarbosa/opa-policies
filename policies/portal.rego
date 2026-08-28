@@ -3,14 +3,12 @@ package portal.authz
 import rego.v1
 
 # ==============================================================================
-# POLÍTICA UNIFICADA PORTAL + TRINO
-# A verdade sobre os acessos reside EXCLUSIVAMENTE no data.json.
-# Default Deny para tudo que não for explicitamente permitido.
+# POLÍTICA UNIFICADA PORTAL + TRINO — Default Deny
 # ==============================================================================
 default allow := false
 
 # ==============================================================================
-# CAMADA DE NORMALIZAÇÃO DE INPUT (BLINDADA)
+# NORMALIZAÇÃO DE INPUT (BLINDADA)
 # ==============================================================================
 get_identity := object.get(input, "identity", object.get(object.get(input, "context", {}), "identity", {}))
 get_action := object.get(input, "action", {})
@@ -101,7 +99,7 @@ req := {
 }
 
 # ==============================================================================
-# FONTE DE PERMISSÕES (tolerante a chave com espaço e ao formato antigo)
+# FONTE DE PERMISSÕES (array por usuário + legado + tolerância a espaços)
 # ==============================================================================
 raw_permissions := p if {
     p := data.user_permissions
@@ -117,7 +115,6 @@ has_permissions(token) if {
     trim(k, " ") == token
 }
 
-# NOVO formato: array de permissões por usuário
 perms_for(token) := perms if {
     some k, v in raw_permissions
     trim(k, " ") == token
@@ -125,7 +122,6 @@ perms_for(token) := perms if {
     perms := v
 }
 
-# LEGADO: objeto único
 perms_for(token) := perms if {
     some k, v in raw_permissions
     trim(k, " ") == token
@@ -133,7 +129,6 @@ perms_for(token) := perms if {
     perms := [v]
 }
 
-# Comparação de coleção tolerante a espaço/case
 colecao_match(perm, colecao_req) if {
     lower(trim(object.get(perm, "nome_colecao", ""), " ")) == lower(trim(colecao_req, " "))
 }
@@ -145,9 +140,65 @@ has_table_resource if {
 }
 
 # ==============================================================================
-# CONTAS DE SERVIÇO / INFRAESTRUTURA
+# CONTROLE TEMPORAL (janela ISO 8601 + validade)
+# limitar_acesso=true  → SOFT: fora da janela libera (e-mail fica c/ a outra camada)
+# limitar_acesso=false → HARD: fora da janela bloqueia
+# data_validade vencida → bloqueio duro sempre
+# campos null/ausentes/vazios → sem restrição
 # ==============================================================================
-service_accounts_full := {"trino", "hadoop", "ingestor"}
+now_ns := time.now_ns()
+
+parse_ts(raw) := ns if {
+    is_string(raw)
+    trim(raw, " ") != ""
+    ns := time.parse_rfc3339_ns(trim(raw, " "))
+}
+
+perm_vencida(perm) if {
+    ns := parse_ts(object.get(perm, "data_validade", null))
+    now_ns >= ns
+}
+
+perm_fora_janela(perm) if {
+    ini := parse_ts(object.get(perm, "horario_inicio", null))
+    fim := parse_ts(object.get(perm, "horario_fim", null))
+    not (now_ns >= ini and now_ns <= fim)
+}
+
+limitar_acesso_soft(perm) if {
+    object.get(perm, "limitar_acesso", null) == true
+}
+
+limitar_acesso_soft(perm) if {
+    raw := object.get(perm, "limitar_acesso", "")
+    is_string(raw)
+    lower(trim(raw, " ")) == "true"
+}
+
+perm_bloqueio_tempo(perm) if {
+    perm_fora_janela(perm)
+    not limitar_acesso_soft(perm)
+}
+
+is_tempo_valido(perm) if {
+    not perm_vencida(perm)
+    not perm_bloqueio_tempo(perm)
+}
+
+# Informativo (não afeta allow): camada de serviço pode consultar p/ disparar e-mail
+access_alert contains msg if {
+    some perm in perms_for(req.token)
+    colecao_match(perm, req.colecao)
+    not perm_vencida(perm)
+    perm_fora_janela(perm)
+    limitar_acesso_soft(perm)
+    msg := sprintf("OUT_OF_HOURS: user=%s colecao=%s", [req.token, req.colecao])
+}
+
+# ==============================================================================
+# CONTAS DE SERVIÇO
+# ==============================================================================
+service_accounts_full := {"trino", "hadoop", "ingestor", "presto"}
 
 allow if {
     req.token in service_accounts_full
@@ -173,68 +224,7 @@ allow if {
 }
 
 # ==============================================================================
-# CONTROLE TEMPORAL (JANELA DE HORÁRIO + DATA DE VALIDADE)
-# Campos do data.json (ISO 8601):
-#   "horario_inicio" / "horario_fim" → janela de acesso
-#   "limitar_acesso": true  → modo SOFT (fora da janela libera; e-mail fica
-#                             por conta da camada de serviço / access_alert)
-#   "limitar_acesso": false → modo HARD (fora da janela = bloqueio)
-#   "data_validade"         → após esta data = bloqueio duro sempre
-# ==============================================================================
-now_ns := time.now_ns()
-
-parse_ts(raw) := ns if {
-    is_string(raw)
-    trim(raw, " ") != ""
-    ns := time.parse_rfc3339_ns(trim(raw, " "))
-}
-
-perm_vencida(perm) if {
-    ns := parse_ts(object.get(perm, "data_validade", null))
-    now_ns >= ns
-}
-
-perm_fora_janela(perm) if {
-    ini := parse_ts(object.get(perm, "horario_inicio", null))
-    fim := parse_ts(object.get(perm, "horario_fim", null))
-    not (now_ns >= ini and now_ns <= fim)
-}
-
-# limitar_acesso == true → modo soft
-limitar_acesso_soft(perm) if {
-    object.get(perm, "limitar_acesso", null) == true
-}
-
-limitar_acesso_soft(perm) if {
-    raw := object.get(perm, "limitar_acesso", "")
-    is_string(raw)
-    lower(trim(raw, " ")) == "true"
-}
-
-# Bloqueio duro: fora da janela E modo hard (flag false/ausente)
-perm_bloqueio_tempo(perm) if {
-    perm_fora_janela(perm)
-    not limitar_acesso_soft(perm)
-}
-
-is_tempo_valido(perm) if {
-    not perm_vencida(perm)
-    not perm_bloqueio_tempo(perm)
-}
-
-# INFORMATIVO (não afeta o allow): camada de serviço pode consultar este
-# endpoint para disparar o e-mail de "acesso fora do horário" (modo soft).
-access_alert contains msg if {
-    some perm in perms_for(req.token)
-    colecao_match(perm, req.colecao)
-    not perm_vencida(perm)
-    perm_fora_janela(perm)
-    limitar_acesso_soft(perm)
-    msg := sprintf("OUT_OF_HOURS: user=%s colecao=%s", [req.token, req.colecao])
-}
-
-# ==============================================================================
-# REGRA 1 — GATE GENÉRICO (nível de catálogo/schema, SEM tabela)
+# REGRA 1 — GATE GENÉRICO (sem tabela)
 # ==============================================================================
 allow if {
     has_permissions(req.token)
@@ -242,7 +232,7 @@ allow if {
 }
 
 # ==============================================================================
-# REGRA 1.5 — METADADOS DE SISTEMA / INFORMATION_SCHEMA (com tabela)
+# REGRA 1.5 — METADADOS DE SISTEMA
 # ==============================================================================
 allow if {
     has_permissions(req.token)
@@ -259,7 +249,7 @@ is_system_target if {
 }
 
 # ==============================================================================
-# REGRA 2 — ACESSO A DADOS (varre TODAS as permissões do usuário)
+# REGRA 2 — ACESSO A DADOS (multi-permissão + colunas + temporal)
 # ==============================================================================
 allow if {
     some perm in perms_for(req.token)
@@ -273,7 +263,7 @@ allow if {
 }
 
 # ==============================================================================
-# VALIDAÇÃO DE CAMPO (case/space-insensitive + array columns do Trino)
+# VALIDAÇÃO DE CAMPO
 # ==============================================================================
 has_campo(r) if {
     _ := r.campo
@@ -287,13 +277,11 @@ campo_permitido_ci(perm, campo_req) if {
     lower(trim(campo_perm, " ")) == lower(trim(campo_req, " "))
 }
 
-# Sem coluna nem array (metadados, SHOW, etc.) → libera
 is_campo_valido(perm, r) if {
     not has_campo(r)
     not has_columns
 }
 
-# SelectFromColumns real do Trino: valida CADA coluna do array
 is_campo_valido(perm, r) if {
     not has_campo(r)
     has_columns
@@ -302,7 +290,6 @@ is_campo_valido(perm, r) if {
     }
 }
 
-# Formato de curl/legado (column.columnName)
 is_campo_valido(perm, r) if {
     has_campo(r)
     campo_permitido_ci(perm, r.campo)
@@ -347,7 +334,7 @@ valida_match_tipo_query(perm_tq, req_tq) if {
 }
 
 # ==============================================================================
-# ANONIMIZAÇÃO (Column Masking) — varre todas as permissões
+# ANONIMIZAÇÃO (Column Masking)
 # ==============================================================================
 has_anonymization if {
     some perm in perms_for(req.token)
@@ -367,7 +354,6 @@ anonymize_rule := rule if {
     get_funcao(rule) != ""
 }
 
-# --- Helpers de leitura tolerantes a espaço/null ---
 get_funcao(rule) := f if {
     raw := object.get(rule, "funcao", "")
     is_string(raw)
@@ -399,79 +385,58 @@ get_indice(rule) := n if {
     n := raw
 }
 
-# --- 1. token-sha256 (sem parâmetro) ---
+# 1. token-sha256
 columnMask := {"expression": sprintf("to_hex(sha256(to_utf8(%s)))", [req.campo])} if {
     get_funcao(anonymize_rule) == "token-sha256"
 }
 
-# --- 2. mascarar-por-completo (parâmetro: símbolo) ---
+# 2. mascarar-por-completo
 columnMask := {"expression": sprintf("regexp_replace(%s, '.', '%s')", [req.campo, get_simbolo(anonymize_rule)])} if {
     get_funcao(anonymize_rule) == "mascarar-por-completo"
 }
 
-# --- 3. mascarar-inicio (símbolo + nº casas) ---
+# 3. mascarar-inicio
 columnMask := {"expression": sprintf("concat(rpad('', %d, '%s'), substring(%s, %d))", [
-    n,
-    sym,
-    req.campo,
-    n + 1
+    n, sym, req.campo, n + 1
 ])} if {
     get_funcao(anonymize_rule) == "mascarar-inicio"
     n := get_indice(anonymize_rule)
     sym := get_simbolo(anonymize_rule)
 }
 
-# --- 4. mascarar-fim (símbolo + nº casas) ---
+# 4. mascarar-fim
 columnMask := {"expression": sprintf("concat(substring(%s, 1, greatest(length(%s) - %d, 0)), rpad('', %d, '%s'))", [
-    req.campo,
-    req.campo,
-    n,
-    n,
-    sym
+    req.campo, req.campo, n, n, sym
 ])} if {
     get_funcao(anonymize_rule) == "mascarar-fim"
     n := get_indice(anonymize_rule)
     sym := get_simbolo(anonymize_rule)
 }
 
-# --- 5. mascarar-inicio-fim (símbolo + nº casas) ---
+# 5. mascarar-inicio-fim
 columnMask := {"expression": sprintf("CASE WHEN length(%s) > %d THEN concat(rpad('', %d, '%s'), substring(%s, %d, greatest(length(%s) - %d, 0)), rpad('', %d, '%s')) ELSE rpad('', length(%s), '%s') END", [
-    req.campo,
-    2 * n,
-    n,
-    sym,
-    req.campo,
-    n + 1,
-    req.campo,
-    2 * n,
-    n,
-    sym,
-    req.campo,
-    sym
+    req.campo, 2 * n, n, sym, req.campo, n + 1, req.campo, 2 * n, n, sym, req.campo, sym
 ])} if {
     get_funcao(anonymize_rule) == "mascarar-inicio-fim"
     n := get_indice(anonymize_rule)
     sym := get_simbolo(anonymize_rule)
 }
 
-# --- Legado: partial-mask ---
+# Legados
 columnMask := {"expression": sprintf("substring(%s, 1, %d) || '***'", [req.campo, anonymize_rule["indice-regex"]])} if {
     get_funcao(anonymize_rule) == "partial-mask"
     is_number(anonymize_rule["indice-regex"])
 }
 
-# --- Legado: symbol-replace ---
 columnMask := {"expression": sprintf("'%s'", [get_simbolo(anonymize_rule)])} if {
     get_funcao(anonymize_rule) == "symbol-replace"
 }
 
-# --- Legado: regex-mask ---
 columnMask := {"expression": sprintf("regexp_replace(%s, '%s', '***')", [req.campo, anonymize_rule["indice-regex"]])} if {
     get_funcao(anonymize_rule) == "regex-mask"
     is_string(anonymize_rule["indice-regex"])
 }
 
-# --- Fallback genérico ---
 columnMask := {"expression": "'***'"} if {
     has_anonymization
     not get_funcao(anonymize_rule) in ["token-sha256", "mascarar-por-completo", "mascarar-inicio", "mascarar-fim", "mascarar-inicio-fim", "partial-mask", "symbol-replace", "regex-mask"]
@@ -505,11 +470,7 @@ deny contains msg if {
 
     msg := sprintf(
         "ACCESS DENIED: user=%s colecao=%s campo=%s",
-        [
-            format_token(token_raw),
-            colecao_str,
-            campo_str
-        ]
+        [format_token(token_raw), colecao_str, campo_str]
     )
 }
 
