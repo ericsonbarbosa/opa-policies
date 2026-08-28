@@ -135,8 +135,8 @@ has_table_resource if {
 
 # ==============================================================================
 # CONTROLE TEMPORAL (janela ISO 8601 + validade)
-# limitar_acesso=true  → SOFT (fora libera; e-mail é da outra camada)
-# limitar_acesso=false → HARD (fora bloqueia)
+# limitar_acesso=false  → SOFT (fora libera; e-mail é da outra camada)
+# limitar_acesso=true → HARD (fora bloqueia)
 # data_validade vencida → bloqueio duro sempre
 # campos null/ausentes/vazios → sem restrição
 # ==============================================================================
@@ -148,9 +148,15 @@ parse_ts(raw) := ns if {
     ns := time.parse_rfc3339_ns(trim(raw, " "))
 }
 
+# Validade = "válido até o fim do dia" no fuso de Brasília,
+# independente de como o Portal codifica o timestamp (início/fim do dia).
 perm_vencida(perm) if {
-    ns := parse_ts(object.get(perm, "data_validade", null))
-    now_ns >= ns
+    raw := object.get(perm, "data_validade", null)
+    is_string(raw)
+    trim(raw, " ") != ""
+    vd := time.date([time.parse_rfc3339_ns(trim(raw, " ")), "America/Sao_Paulo"])
+    td := time.date([time.now_ns(), "America/Sao_Paulo"])
+    (td[0] * 10000 + td[1] * 100 + td[2]) > (vd[0] * 10000 + vd[1] * 100 + vd[2])
 }
 
 # "fora da janela" quebrado em duas regras (OPA v1 não aceita `and` dentro de `not (...)`)
