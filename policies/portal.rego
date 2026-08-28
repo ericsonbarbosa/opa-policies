@@ -165,13 +165,13 @@ perm_fora_janela(perm) if {
 }
 
 limitar_acesso_soft(perm) if {
-    object.get(perm, "limitar_acesso", null) == true
+    object.get(perm, "limitar_acesso", null) == false
 }
 
 limitar_acesso_soft(perm) if {
     raw := object.get(perm, "limitar_acesso", "")
     is_string(raw)
-    lower(trim(raw, " ")) == "true"
+    lower(trim(raw, " ")) == "false"
 }
 
 perm_bloqueio_tempo(perm) if {
