@@ -10,13 +10,13 @@ default allow := false
 # ==============================================================================
 # HELPER: busca chave tolerando espaços no final (data.json bugado)
 # ==============================================================================
-get_key(obj, key, default) := val if {
+get_key(obj, key, def) := val if {
     some k, v in obj
     trim(k, " ") == key
     val := v
 }
 
-get_key(obj, key, default) := default if {
+get_key(obj, key, def) := def if {
     count({v | some k, v in obj; trim(k, " ") == key}) == 0
 }
 
