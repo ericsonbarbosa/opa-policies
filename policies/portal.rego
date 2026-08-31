@@ -339,26 +339,31 @@ valida_match_tipo_query(perm_tq, req_tq) if {
 }
 
 # ==============================================================================
-# ANONIMIZAÇÃO (Column Masking)
+# ANONIMIZAÇÃO (Column Masking) - CORREÇÃO para múltiplas permissões
 # ==============================================================================
+
+# Coleta TODAS as regras de anonimização que dão match (pode ser 0, 1 ou mais)
+find_anonymization_rules := [rule |
+    some perm in perms_for(req.token)
+    colecao_match(perm, req.colecao)
+    some r in object.get(perm, "anonimizacao", [])
+    is_string(r.campo)
+    lower(trim(r.campo, " ")) == lower(trim(req.campo, " "))
+    is_string(r.funcao)
+    trim(r.funcao, " ") != ""
+    rule := r
+]
+
 has_anonymization if {
-    some perm in perms_for(req.token)
-    colecao_match(perm, req.colecao)
-    some rule in object.get(perm, "anonimizacao", [])
-    is_string(rule.campo)
-    lower(trim(rule.campo, " ")) == lower(req.campo)
-    get_funcao(rule) != ""
+    count(find_anonymization_rules) > 0
 }
 
-anonymize_rule := rule if {
-    some perm in perms_for(req.token)
-    colecao_match(perm, req.colecao)
-    some rule in object.get(perm, "anonimizacao", [])
-    is_string(rule.campo)
-    lower(trim(rule.campo, " ")) == lower(req.campo)
-    get_funcao(rule) != ""
+# Pega APENAS a primeira regra encontrada (garante unicidade e evita o conflito)
+anonymize_rule := find_anonymization_rules[0] if {
+    count(find_anonymization_rules) > 0
 }
 
+# --- Helpers de leitura seguros ---
 get_funcao(rule) := f if {
     raw := object.get(rule, "funcao", "")
     is_string(raw)
@@ -366,7 +371,7 @@ get_funcao(rule) := f if {
 }
 
 get_simbolo(rule) := s if {
-    raw := object.get(rule, "simbolo", "")
+    raw := object.get(rule, "simbolo", "*")
     is_string(raw)
     t := trim(raw, " ")
     t != ""
@@ -374,14 +379,14 @@ get_simbolo(rule) := s if {
 }
 
 get_simbolo(rule) := "*" if {
-    raw := object.get(rule, "simbolo", "")
-    is_string(raw)
-    trim(raw, " ") == ""
+    raw := object.get(rule, "simbolo", "*")
+    not is_string(raw)
 }
 
 get_simbolo(rule) := "*" if {
-    raw := object.get(rule, "simbolo", "")
-    not is_string(raw)
+    raw := object.get(rule, "simbolo", "*")
+    is_string(raw)
+    trim(raw, " ") == ""
 }
 
 get_indice(rule) := n if {
@@ -390,6 +395,7 @@ get_indice(rule) := n if {
     n := raw
 }
 
+# --- Máscaras ---
 columnMask := {"expression": sprintf("to_hex(sha256(to_utf8(%s)))", [req.campo])} if {
     get_funcao(anonymize_rule) == "token-sha256"
 }
@@ -399,47 +405,24 @@ columnMask := {"expression": sprintf("regexp_replace(%s, '.', '%s')", [req.campo
 }
 
 columnMask := {"expression": sprintf("concat(rpad('', %d, '%s'), substring(%s, %d))", [
-    n, sym, req.campo, n + 1
+    get_indice(anonymize_rule),
+    get_simbolo(anonymize_rule),
+    req.campo,
+    get_indice(anonymize_rule) + 1
 ])} if {
     get_funcao(anonymize_rule) == "mascarar-inicio"
-    n := get_indice(anonymize_rule)
-    sym := get_simbolo(anonymize_rule)
+    is_number(get_indice(anonymize_rule))
 }
 
 columnMask := {"expression": sprintf("concat(substring(%s, 1, greatest(length(%s) - %d, 0)), rpad('', %d, '%s'))", [
-    req.campo, req.campo, n, n, sym
+    req.campo,
+    req.campo,
+    get_indice(anonymize_rule),
+    get_indice(anonymize_rule),
+    get_simbolo(anonymize_rule)
 ])} if {
     get_funcao(anonymize_rule) == "mascarar-fim"
-    n := get_indice(anonymize_rule)
-    sym := get_simbolo(anonymize_rule)
-}
 
-columnMask := {"expression": sprintf("CASE WHEN length(%s) > %d THEN concat(rpad('', %d, '%s'), substring(%s, %d, greatest(length(%s) - %d, 0)), rpad('', %d, '%s')) ELSE rpad('', length(%s), '%s') END", [
-    req.campo, 2 * n, n, sym, req.campo, n + 1, req.campo, 2 * n, n, sym, req.campo, sym
-])} if {
-    get_funcao(anonymize_rule) == "mascarar-inicio-fim"
-    n := get_indice(anonymize_rule)
-    sym := get_simbolo(anonymize_rule)
-}
-
-columnMask := {"expression": sprintf("substring(%s, 1, %d) || '***'", [req.campo, anonymize_rule["indice-regex"]])} if {
-    get_funcao(anonymize_rule) == "partial-mask"
-    is_number(anonymize_rule["indice-regex"])
-}
-
-columnMask := {"expression": sprintf("'%s'", [get_simbolo(anonymize_rule)])} if {
-    get_funcao(anonymize_rule) == "symbol-replace"
-}
-
-columnMask := {"expression": sprintf("regexp_replace(%s, '%s', '***')", [req.campo, anonymize_rule["indice-regex"]])} if {
-    get_funcao(anonymize_rule) == "regex-mask"
-    is_string(anonymize_rule["indice-regex"])
-}
-
-columnMask := {"expression": "'***'"} if {
-    has_anonymization
-    not get_funcao(anonymize_rule) in ["token-sha256", "mascarar-por-completo", "mascarar-inicio", "mascarar-fim", "mascarar-inicio-fim", "partial-mask", "symbol-replace", "regex-mask"]
-}
 
 # ==============================================================================
 # FILTROS E INFO DA COLEÇÃO
