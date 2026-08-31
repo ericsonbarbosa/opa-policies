@@ -2,6 +2,9 @@ package portal.authz
 
 import rego.v1
 
+# ==============================================================================
+# POLÍTICA UNIFICADA PORTAL + TRINO — Default Deny
+# ==============================================================================
 default allow := false
 
 # ==============================================================================
@@ -11,11 +14,13 @@ get_identity := object.get(input, "identity", object.get(object.get(input, "cont
 get_action := object.get(input, "action", {})
 get_resource := object.get(get_action, "resource", {})
 
+# Allow: tabela vem em resource.table
 get_table := t if {
     t := object.get(get_resource, "table", {})
     t != {}
 }
 
+# GetColumnMask: o Trino embute catalog/schema/table DENTRO de resource.column
 get_table := t if {
     object.get(get_resource, "table", {}) == {}
     t := object.get(get_resource, "column", {})
@@ -44,6 +49,7 @@ get_campo := f if {
     f := object.get(get_column, "columnName", object.get(input, "campo", ""))
 }
 
+# SelectFromColumns real do Trino: colunas vêm num array DENTRO de resource.table
 get_columns := object.get(get_table, "columns", object.get(get_resource, "columns", []))
 
 has_columns if {
@@ -135,9 +141,9 @@ has_table_resource if {
 
 # ==============================================================================
 # CONTROLE TEMPORAL (janela ISO 8601 + validade)
-# limitar_acesso=false  → SOFT (fora libera; e-mail é da outra camada)
-# limitar_acesso=true → HARD (fora bloqueia)
-# data_validade vencida → bloqueio duro sempre
+# limitar_acesso=true  → HARD (fora da janela bloqueia)
+# limitar_acesso=false → SOFT (fora libera; e-mail é da outra camada)
+# data_validade vencida → bloqueio duro sempre (comparação só pela DATA em SP)
 # campos null/ausentes/vazios → sem restrição
 # ==============================================================================
 now_ns := time.now_ns()
@@ -148,8 +154,7 @@ parse_ts(raw) := ns if {
     ns := time.parse_rfc3339_ns(trim(raw, " "))
 }
 
-# Validade = "válido até o fim do dia" no fuso de Brasília,
-# independente de como o Portal codifica o timestamp (início/fim do dia).
+# "válido até o fim do dia" no fuso de Brasília
 perm_vencida(perm) if {
     raw := object.get(perm, "data_validade", null)
     is_string(raw)
@@ -159,7 +164,6 @@ perm_vencida(perm) if {
     (td[0] * 10000 + td[1] * 100 + td[2]) > (vd[0] * 10000 + vd[1] * 100 + vd[2])
 }
 
-# "fora da janela" quebrado em duas regras (OPA v1 não aceita `and` dentro de `not (...)`)
 perm_fora_janela(perm) if {
     ini := parse_ts(object.get(perm, "horario_inicio", null))
     now_ns < ini
@@ -190,7 +194,6 @@ is_tempo_valido(perm) if {
     not perm_bloqueio_tempo(perm)
 }
 
-# Informativo (não afeta allow): camada de serviço consulta p/ disparar e-mail
 access_alert contains msg if {
     some perm in perms_for(req.token)
     colecao_match(perm, req.colecao)
@@ -198,6 +201,17 @@ access_alert contains msg if {
     perm_fora_janela(perm)
     limitar_acesso_soft(perm)
     msg := sprintf("OUT_OF_HOURS: user=%s colecao=%s", [req.token, req.colecao])
+}
+
+expired_alert contains msg if {
+    some perm in perms_for(req.token)
+    colecao_match(perm, req.colecao)
+    perm_vencida(perm)
+    msg := sprintf("EXPIRED: user=%s colecao=%s validade=%s", [
+        req.token,
+        req.colecao,
+        object.get(perm, "data_validade", "?")
+    ])
 }
 
 # ==============================================================================
@@ -339,10 +353,9 @@ valida_match_tipo_query(perm_tq, req_tq) if {
 }
 
 # ==============================================================================
-# ANONIMIZAÇÃO (Column Masking) - CORREÇÃO para múltiplas permissões
+# ANONIMIZAÇÃO (Column Masking) — evita eval_conflict_error
+# Coleta todas as regras que dão match e usa APENAS a primeira
 # ==============================================================================
-
-# Coleta TODAS as regras de anonimização que dão match (pode ser 0, 1 ou mais)
 find_anonymization_rules := [rule |
     some perm in perms_for(req.token)
     colecao_match(perm, req.colecao)
@@ -358,12 +371,10 @@ has_anonymization if {
     count(find_anonymization_rules) > 0
 }
 
-# Pega APENAS a primeira regra encontrada (garante unicidade e evita o conflito)
 anonymize_rule := find_anonymization_rules[0] if {
     count(find_anonymization_rules) > 0
 }
 
-# --- Helpers de leitura seguros ---
 get_funcao(rule) := f if {
     raw := object.get(rule, "funcao", "")
     is_string(raw)
@@ -395,7 +406,6 @@ get_indice(rule) := n if {
     n := raw
 }
 
-# --- Máscaras ---
 columnMask := {"expression": sprintf("to_hex(sha256(to_utf8(%s)))", [req.campo])} if {
     get_funcao(anonymize_rule) == "token-sha256"
 }
@@ -405,24 +415,50 @@ columnMask := {"expression": sprintf("regexp_replace(%s, '.', '%s')", [req.campo
 }
 
 columnMask := {"expression": sprintf("concat(rpad('', %d, '%s'), substring(%s, %d))", [
-    get_indice(anonymize_rule),
-    get_simbolo(anonymize_rule),
-    req.campo,
-    get_indice(anonymize_rule) + 1
+    n, sym, req.campo, n + 1
 ])} if {
     get_funcao(anonymize_rule) == "mascarar-inicio"
-    is_number(get_indice(anonymize_rule))
+    n := get_indice(anonymize_rule)
+    sym := get_simbolo(anonymize_rule)
+    is_number(n)
 }
 
 columnMask := {"expression": sprintf("concat(substring(%s, 1, greatest(length(%s) - %d, 0)), rpad('', %d, '%s'))", [
-    req.campo,
-    req.campo,
-    get_indice(anonymize_rule),
-    get_indice(anonymize_rule),
-    get_simbolo(anonymize_rule)
+    req.campo, req.campo, n, n, sym
 ])} if {
     get_funcao(anonymize_rule) == "mascarar-fim"
+    n := get_indice(anonymize_rule)
+    sym := get_simbolo(anonymize_rule)
+    is_number(n)
+}
 
+columnMask := {"expression": sprintf("CASE WHEN length(%s) > %d THEN concat(rpad('', %d, '%s'), substring(%s, %d, greatest(length(%s) - %d, 0)), rpad('', %d, '%s')) ELSE rpad('', length(%s), '%s') END", [
+    req.campo, 2 * n, n, sym, req.campo, n + 1, req.campo, 2 * n, n, sym, req.campo, sym
+])} if {
+    get_funcao(anonymize_rule) == "mascarar-inicio-fim"
+    n := get_indice(anonymize_rule)
+    sym := get_simbolo(anonymize_rule)
+    is_number(n)
+}
+
+columnMask := {"expression": sprintf("substring(%s, 1, %d) || '***'", [req.campo, anonymize_rule["indice-regex"]])} if {
+    get_funcao(anonymize_rule) == "partial-mask"
+    is_number(anonymize_rule["indice-regex"])
+}
+
+columnMask := {"expression": sprintf("'%s'", [get_simbolo(anonymize_rule)])} if {
+    get_funcao(anonymize_rule) == "symbol-replace"
+}
+
+columnMask := {"expression": sprintf("regexp_replace(%s, '%s', '***')", [req.campo, anonymize_rule["indice-regex"]])} if {
+    get_funcao(anonymize_rule) == "regex-mask"
+    is_string(anonymize_rule["indice-regex"])
+}
+
+columnMask := {"expression": "'***'"} if {
+    has_anonymization
+    not get_funcao(anonymize_rule) in ["token-sha256", "mascarar-por-completo", "mascarar-inicio", "mascarar-fim", "mascarar-inicio-fim", "partial-mask", "symbol-replace", "regex-mask"]
+}
 
 # ==============================================================================
 # FILTROS E INFO DA COLEÇÃO
@@ -444,6 +480,23 @@ collection_info := {
     colecao_match(perm, req.colecao)
 }
 
+# ==============================================================================
+# ROW FILTERS (SQL pronto, gerado pelo Portal usando metadata do Trino)
+# ==============================================================================
+rowFilters := filters if {
+    filters := [
+        {"expression": e} |
+            some perm in perms_for(req.token)
+            colecao_match(perm, req.colecao)
+            e := trim(object.get(perm, "row_filter_sql", ""), " ")
+            e != ""
+    ]
+    count(filters) > 0
+}
+
+# ==============================================================================
+# DENY + FORMAT
+# ==============================================================================
 deny contains msg if {
     not allow
     campo_str := object.get(input, "campo", object.get(get_column, "columnName", "N/A"))
