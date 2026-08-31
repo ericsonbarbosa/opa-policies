@@ -8,19 +8,30 @@ import rego.v1
 default allow := false
 
 # ==============================================================================
+# HELPER: busca chave tolerando espaços no final (data.json bugado)
+# ==============================================================================
+get_key(obj, key, default) := val if {
+    some k, v in obj
+    trim(k, " ") == key
+    val := v
+}
+
+get_key(obj, key, default) := default if {
+    count({v | some k, v in obj; trim(k, " ") == key}) == 0
+}
+
+# ==============================================================================
 # NORMALIZAÇÃO DE INPUT (BLINDADA)
 # ==============================================================================
 get_identity := object.get(input, "identity", object.get(object.get(input, "context", {}), "identity", {}))
 get_action := object.get(input, "action", {})
 get_resource := object.get(get_action, "resource", {})
 
-# Allow: tabela vem em resource.table
 get_table := t if {
     t := object.get(get_resource, "table", {})
     t != {}
 }
 
-# GetColumnMask: o Trino embute catalog/schema/table DENTRO de resource.column
 get_table := t if {
     object.get(get_resource, "table", {}) == {}
     t := object.get(get_resource, "column", {})
@@ -49,7 +60,6 @@ get_campo := f if {
     f := object.get(get_column, "columnName", object.get(input, "campo", ""))
 }
 
-# SelectFromColumns real do Trino: colunas vêm num array DENTRO de resource.table
 get_columns := object.get(get_table, "columns", object.get(get_resource, "columns", []))
 
 has_columns if {
@@ -129,8 +139,13 @@ perms_for(token) := perms if {
     perms := [v]
 }
 
+# ==============================================================================
+# COLEÇÃO MATCH (tolerante a espaços nas chaves)
+# ==============================================================================
 colecao_match(perm, colecao_req) if {
-    lower(trim(object.get(perm, "nome_colecao", ""), " ")) == lower(trim(colecao_req, " "))
+    nome := get_key(perm, "nome_colecao", "")
+    is_string(nome)
+    lower(trim(nome, " ")) == lower(trim(colecao_req, " "))
 }
 
 has_table_resource if {
@@ -141,10 +156,6 @@ has_table_resource if {
 
 # ==============================================================================
 # CONTROLE TEMPORAL (janela ISO 8601 + validade)
-# limitar_acesso=true  → HARD (fora da janela bloqueia)
-# limitar_acesso=false → SOFT (fora libera; e-mail é da outra camada)
-# data_validade vencida → bloqueio duro sempre (comparação só pela DATA em SP)
-# campos null/ausentes/vazios → sem restrição
 # ==============================================================================
 now_ns := time.now_ns()
 
@@ -154,9 +165,8 @@ parse_ts(raw) := ns if {
     ns := time.parse_rfc3339_ns(trim(raw, " "))
 }
 
-# "válido até o fim do dia" no fuso de Brasília
 perm_vencida(perm) if {
-    raw := object.get(perm, "data_validade", null)
+    raw := get_key(perm, "data_validade", null)
     is_string(raw)
     trim(raw, " ") != ""
     vd := time.date([time.parse_rfc3339_ns(trim(raw, " ")), "America/Sao_Paulo"])
@@ -165,21 +175,21 @@ perm_vencida(perm) if {
 }
 
 perm_fora_janela(perm) if {
-    ini := parse_ts(object.get(perm, "horario_inicio", null))
+    ini := parse_ts(get_key(perm, "horario_inicio", null))
     now_ns < ini
 }
 
 perm_fora_janela(perm) if {
-    fim := parse_ts(object.get(perm, "horario_fim", null))
+    fim := parse_ts(get_key(perm, "horario_fim", null))
     now_ns > fim
 }
 
 limitar_acesso_soft(perm) if {
-    object.get(perm, "limitar_acesso", null) == false
+    get_key(perm, "limitar_acesso", null) == false
 }
 
 limitar_acesso_soft(perm) if {
-    raw := object.get(perm, "limitar_acesso", "")
+    raw := get_key(perm, "limitar_acesso", "")
     is_string(raw)
     lower(trim(raw, " ")) == "false"
 }
@@ -210,7 +220,7 @@ expired_alert contains msg if {
     msg := sprintf("EXPIRED: user=%s colecao=%s validade=%s", [
         req.token,
         req.colecao,
-        object.get(perm, "data_validade", "?")
+        get_key(perm, "data_validade", "?")
     ])
 }
 
@@ -282,7 +292,7 @@ allow if {
 }
 
 # ==============================================================================
-# VALIDAÇÃO DE CAMPO
+# VALIDAÇÃO DE CAMPO (tolerante a espaços nas chaves)
 # ==============================================================================
 has_campo(r) if {
     _ := r.campo
@@ -291,7 +301,8 @@ has_campo(r) if {
 }
 
 campo_permitido_ci(perm, campo_req) if {
-    some campo_perm in object.get(perm, "campos_permitidos", [])
+    campos := get_key(perm, "campos_permitidos", [])
+    some campo_perm in campos
     is_string(campo_perm)
     lower(trim(campo_perm, " ")) == lower(trim(campo_req, " "))
 }
@@ -324,9 +335,9 @@ has_req_tq(r) if {
 }
 
 has_perm_tq(perm) if {
-    _ := perm.tipo_query
-    perm.tipo_query != ""
-    perm.tipo_query != null
+    tq := get_key(perm, "tipo_query", null)
+    tq != null
+    tq != ""
 }
 
 is_tipo_query_valido(perm, r) if not has_req_tq(r)
@@ -339,7 +350,7 @@ is_tipo_query_valido(perm, r) if {
 is_tipo_query_valido(perm, r) if {
     has_req_tq(r)
     has_perm_tq(perm)
-    valida_match_tipo_query(perm.tipo_query, r.tipo_query)
+    valida_match_tipo_query(get_key(perm, "tipo_query", null), r.tipo_query)
 }
 
 valida_match_tipo_query(perm_tq, req_tq) if {
@@ -353,17 +364,18 @@ valida_match_tipo_query(perm_tq, req_tq) if {
 }
 
 # ==============================================================================
-# ANONIMIZAÇÃO (Column Masking) — evita eval_conflict_error
-# Coleta todas as regras que dão match e usa APENAS a primeira
+# ANONIMIZAÇÃO (Column Masking) — tolerante a espaços nas chaves
 # ==============================================================================
 find_anonymization_rules := [rule |
     some perm in perms_for(req.token)
     colecao_match(perm, req.colecao)
-    some r in object.get(perm, "anonimizacao", [])
-    is_string(r.campo)
-    lower(trim(r.campo, " ")) == lower(trim(req.campo, " "))
-    is_string(r.funcao)
-    trim(r.funcao, " ") != ""
+    some r in get_key(perm, "anonimizacao", [])
+    campo_r := get_key(r, "campo", null)
+    is_string(campo_r)
+    lower(trim(campo_r, " ")) == lower(trim(req.campo, " "))
+    funcao_r := get_key(r, "funcao", null)
+    is_string(funcao_r)
+    trim(funcao_r, " ") != ""
     rule := r
 ]
 
@@ -376,13 +388,13 @@ anonymize_rule := find_anonymization_rules[0] if {
 }
 
 get_funcao(rule) := f if {
-    raw := object.get(rule, "funcao", "")
+    raw := get_key(rule, "funcao", "")
     is_string(raw)
     f := trim(raw, " ")
 }
 
 get_simbolo(rule) := s if {
-    raw := object.get(rule, "simbolo", "*")
+    raw := get_key(rule, "simbolo", "*")
     is_string(raw)
     t := trim(raw, " ")
     t != ""
@@ -390,22 +402,25 @@ get_simbolo(rule) := s if {
 }
 
 get_simbolo(rule) := "*" if {
-    raw := object.get(rule, "simbolo", "*")
+    raw := get_key(rule, "simbolo", "*")
     not is_string(raw)
 }
 
 get_simbolo(rule) := "*" if {
-    raw := object.get(rule, "simbolo", "*")
+    raw := get_key(rule, "simbolo", "*")
     is_string(raw)
     trim(raw, " ") == ""
 }
 
 get_indice(rule) := n if {
-    raw := object.get(rule, "indice-regex", null)
+    raw := get_key(rule, "indice-regex", null)
     is_number(raw)
     n := raw
 }
 
+# ==============================================================================
+# MÁSCARAS
+# ==============================================================================
 columnMask := {"expression": sprintf("to_hex(sha256(to_utf8(%s)))", [req.campo])} if {
     get_funcao(anonymize_rule) == "token-sha256"
 }
@@ -441,18 +456,18 @@ columnMask := {"expression": sprintf("CASE WHEN length(%s) > %d THEN concat(rpad
     is_number(n)
 }
 
-columnMask := {"expression": sprintf("substring(%s, 1, %d) || '***'", [req.campo, anonymize_rule["indice-regex"]])} if {
+columnMask := {"expression": sprintf("substring(%s, 1, %d) || '***'", [req.campo, get_key(anonymize_rule, "indice-regex", 0)])} if {
     get_funcao(anonymize_rule) == "partial-mask"
-    is_number(anonymize_rule["indice-regex"])
+    is_number(get_key(anonymize_rule, "indice-regex", null))
 }
 
 columnMask := {"expression": sprintf("'%s'", [get_simbolo(anonymize_rule)])} if {
     get_funcao(anonymize_rule) == "symbol-replace"
 }
 
-columnMask := {"expression": sprintf("regexp_replace(%s, '%s', '***')", [req.campo, anonymize_rule["indice-regex"]])} if {
+columnMask := {"expression": sprintf("regexp_replace(%s, '%s', '***')", [req.campo, get_key(anonymize_rule, "indice-regex", "")])} if {
     get_funcao(anonymize_rule) == "regex-mask"
-    is_string(anonymize_rule["indice-regex"])
+    is_string(get_key(anonymize_rule, "indice-regex", null))
 }
 
 columnMask := {"expression": "'***'"} if {
@@ -466,29 +481,29 @@ columnMask := {"expression": "'***'"} if {
 required_filters := res if {
     some perm in perms_for(req.token)
     colecao_match(perm, req.colecao)
-    res := object.get(perm, "filtros", [])
+    res := get_key(perm, "filtros", [])
 }
 
 collection_info := {
-    "colecao_id": object.get(perm, "colecao_id", null),
-    "nome_colecao": perm.nome_colecao,
-    "tipo_colecao": object.get(perm, "tipo_colecao", "N/A"),
-    "tipo_campos": object.get(perm, "tipo_campos", "N/A"),
-    "campos_permitidos": object.get(perm, "campos_permitidos", []),
+    "colecao_id": get_key(perm, "colecao_id", null),
+    "nome_colecao": get_key(perm, "nome_colecao", ""),
+    "tipo_colecao": get_key(perm, "tipo_colecao", "N/A"),
+    "tipo_campos": get_key(perm, "tipo_campos", "N/A"),
+    "campos_permitidos": get_key(perm, "campos_permitidos", []),
 } if {
     some perm in perms_for(req.token)
     colecao_match(perm, req.colecao)
 }
 
 # ==============================================================================
-# ROW FILTERS (SQL pronto, gerado pelo Portal usando metadata do Trino)
+# ROW FILTERS (SQL pronto, gerado pelo Portal)
 # ==============================================================================
 rowFilters := filters if {
     filters := [
         {"expression": e} |
             some perm in perms_for(req.token)
             colecao_match(perm, req.colecao)
-            e := trim(object.get(perm, "row_filter_sql", ""), " ")
+            e := trim(get_key(perm, "row_filter_sql", ""), " ")
             e != ""
     ]
     count(filters) > 0
