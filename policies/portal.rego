@@ -8,16 +8,16 @@ import rego.v1
 default allow := false
 
 # ==============================================================================
-# HELPER: busca chave tolerando espaços no final (data.json bugado)
+# HELPER: busca chave tolerando espaço no final (data.json com/sem espaço)
 # ==============================================================================
 get_key(obj, key, def) := val if {
-    some k, v in obj
-    trim(k, " ") == key
-    val := v
+    val := object.get(obj, key, null)
+    val != null
 }
 
-get_key(obj, key, def) := def if {
-    count({v | some k, v in obj; trim(k, " ") == key}) == 0
+get_key(obj, key, def) := val if {
+    object.get(obj, key, null) == null
+    val := object.get(obj, sprintf("%s ", [key]), def)
 }
 
 # ==============================================================================
@@ -139,9 +139,6 @@ perms_for(token) := perms if {
     perms := [v]
 }
 
-# ==============================================================================
-# COLEÇÃO MATCH (tolerante a espaços nas chaves)
-# ==============================================================================
 colecao_match(perm, colecao_req) if {
     nome := get_key(perm, "nome_colecao", "")
     is_string(nome)
@@ -152,6 +149,24 @@ has_table_resource if {
     t := object.get(get_resource, "table", null)
     t != null
     t != {}
+}
+
+# ==============================================================================
+# CONJUNTO ATIVO/BLOQUEADO
+# ativo=false (ou ausente) → ativo | ativo=true → bloqueado/oculto
+# ==============================================================================
+perm_bloqueada(perm) if {
+    get_key(perm, "ativo", false) == true
+}
+
+perm_bloqueada(perm) if {
+    raw := get_key(perm, "ativo", "false")
+    is_string(raw)
+    lower(trim(raw, " ")) == "true"
+}
+
+perm_ativa(perm) if {
+    not perm_bloqueada(perm)
 }
 
 # ==============================================================================
@@ -206,6 +221,7 @@ is_tempo_valido(perm) if {
 
 access_alert contains msg if {
     some perm in perms_for(req.token)
+    perm_ativa(perm)
     colecao_match(perm, req.colecao)
     not perm_vencida(perm)
     perm_fora_janela(perm)
@@ -215,6 +231,7 @@ access_alert contains msg if {
 
 expired_alert contains msg if {
     some perm in perms_for(req.token)
+    perm_ativa(perm)
     colecao_match(perm, req.colecao)
     perm_vencida(perm)
     msg := sprintf("EXPIRED: user=%s colecao=%s validade=%s", [
@@ -278,10 +295,11 @@ is_system_target if {
 }
 
 # ==============================================================================
-# REGRA 2 — ACESSO A DADOS (multi-permissão + colunas + temporal)
+# REGRA 2 — ACESSO A DADOS (ativa + coleção + colunas + temporal)
 # ==============================================================================
 allow if {
     some perm in perms_for(req.token)
+    perm_ativa(perm)
     has_table_resource
     not is_system_target
     req.colecao != ""
@@ -292,7 +310,7 @@ allow if {
 }
 
 # ==============================================================================
-# VALIDAÇÃO DE CAMPO (tolerante a espaços nas chaves)
+# VALIDAÇÃO DE CAMPO
 # ==============================================================================
 has_campo(r) if {
     _ := r.campo
@@ -364,10 +382,11 @@ valida_match_tipo_query(perm_tq, req_tq) if {
 }
 
 # ==============================================================================
-# ANONIMIZAÇÃO (Column Masking) — tolerante a espaços nas chaves
+# ANONIMIZAÇÃO (Column Masking) — só para conjuntos ATIVOS
 # ==============================================================================
 find_anonymization_rules := [rule |
     some perm in perms_for(req.token)
+    perm_ativa(perm)
     colecao_match(perm, req.colecao)
     some r in get_key(perm, "anonimizacao", [])
     campo_r := get_key(r, "campo", null)
@@ -418,9 +437,6 @@ get_indice(rule) := n if {
     n := raw
 }
 
-# ==============================================================================
-# MÁSCARAS
-# ==============================================================================
 columnMask := {"expression": sprintf("to_hex(sha256(to_utf8(%s)))", [req.campo])} if {
     get_funcao(anonymize_rule) == "token-sha256"
 }
@@ -480,6 +496,7 @@ columnMask := {"expression": "'***'"} if {
 # ==============================================================================
 required_filters := res if {
     some perm in perms_for(req.token)
+    perm_ativa(perm)
     colecao_match(perm, req.colecao)
     res := get_key(perm, "filtros", [])
 }
@@ -492,16 +509,18 @@ collection_info := {
     "campos_permitidos": get_key(perm, "campos_permitidos", []),
 } if {
     some perm in perms_for(req.token)
+    perm_ativa(perm)
     colecao_match(perm, req.colecao)
 }
 
 # ==============================================================================
-# ROW FILTERS (SQL pronto, gerado pelo Portal)
+# ROW FILTERS (SQL pronto do Portal) — só para conjuntos ATIVOS
 # ==============================================================================
 rowFilters := filters if {
     filters := [
         {"expression": e} |
             some perm in perms_for(req.token)
+            perm_ativa(perm)
             colecao_match(perm, req.colecao)
             e := trim(get_key(perm, "row_filter_sql", ""), " ")
             e != ""
@@ -510,10 +529,18 @@ rowFilters := filters if {
 }
 
 # ==============================================================================
-# DENY + FORMAT
+# DENY — silencioso quando o conjunto está bloqueado (ativo=true)
 # ==============================================================================
+conjunto_silenciado if {
+    req.colecao != ""
+    some perm in perms_for(req.token)
+    colecao_match(perm, req.colecao)
+    perm_bloqueada(perm)
+}
+
 deny contains msg if {
     not allow
+    not conjunto_silenciado
     campo_str := object.get(input, "campo", object.get(get_column, "columnName", "N/A"))
     colecao_str := object.get(input, "colecao", object.get(get_table, "tableName", object.get(get_table, "schemaName", "N/A")))
     token_raw := object.get(input, "token", object.get(get_identity, "user", "N/A"))
