@@ -153,20 +153,22 @@ has_table_resource if {
 
 # ==============================================================================
 # CONJUNTO ATIVO/BLOQUEADO
-# ativo=false (ou ausente) → ativo | ativo=true → bloqueado/oculto
+# ativo=true (ou ausente) = liberado | ativo=false = bloqueado/oculto
+# Encerramento: entrada permanece com ativo=false
+# Reativação: gera duplicata com ativo=true (só esta vigora)
 # ==============================================================================
-perm_bloqueada(perm) if {
-    get_key(perm, "ativo", false) == true
+perm_ativa(perm) if {
+    get_key(perm, "ativo", true) == true
 }
 
-perm_bloqueada(perm) if {
-    raw := get_key(perm, "ativo", "false")
+perm_ativa(perm) if {
+    raw := get_key(perm, "ativo", "true")
     is_string(raw)
     lower(trim(raw, " ")) == "true"
 }
 
-perm_ativa(perm) if {
-    not perm_bloqueada(perm)
+perm_bloqueada(perm) if {
+    not perm_ativa(perm)
 }
 
 # ==============================================================================
