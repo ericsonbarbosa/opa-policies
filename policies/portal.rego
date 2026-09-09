@@ -626,13 +626,29 @@ sql_literal(v) := v if {
 parse_filter_sql(col, expr) := sql if {
     or_groups := split(expr, "||")
     gs := [g | some og in or_groups; g := parse_and_group(col, trim(og, " "))]
-    sql := count(gs) == 1 ? gs[0] : sprintf("(%s)", [concat(" OR ", gs)])
+    count(gs) == 1
+    sql := gs[0]
+}
+
+parse_filter_sql(col, expr) := sql if {
+    or_groups := split(expr, "||")
+    gs := [g | some og in or_groups; g := parse_and_group(col, trim(og, " "))]
+    count(gs) > 1
+    sql := sprintf("(%s)", [concat(" OR ", gs)])
 }
 
 parse_and_group(col, grp) := sql if {
     parts := split(grp, "&&")
     cs := [c | some p in parts; c := parse_cond(col, trim(p, " "))]
-    sql := count(cs) == 1 ? cs[0] : sprintf("(%s)", [concat(" AND ", cs)])
+    count(cs) == 1
+    sql := cs[0]
+}
+
+parse_and_group(col, grp) := sql if {
+    parts := split(grp, "&&")
+    cs := [c | some p in parts; c := parse_cond(col, trim(p, " "))]
+    count(cs) > 1
+    sql := sprintf("(%s)", [concat(" AND ", cs)])
 }
 
 parse_cond(col, part) := sql if {
