@@ -335,8 +335,19 @@ is_datamart_columns_validos(perm) if {
     tconf := datamart_table_conf(perm)
     cols := get_key(tconf, "columns", {})
     every c in get_columns {
-        coluna_tecnica(c) or get_key(col_conf(cols, c), "show", true) == true
+        coluna_ok_datamart(cols, c)
     }
+}
+
+# "OR" feito do jeito Rego: múltiplas definições da mesma regra
+coluna_ok_datamart(cols, c) if {
+    coluna_tecnica(c)
+}
+
+coluna_ok_datamart(cols, c) if {
+    not coluna_tecnica(c)
+    cconf := col_conf(cols, c)
+    get_key(cconf, "show", true) == true
 }
 
 # ==============================================================================
@@ -383,19 +394,24 @@ is_campo_valido(perm, r) if {
     not has_campo(r)
     has_columns
     every c in get_columns {
-        coluna_tecnica(c) or campo_permitido_ci(perm, c)
+        coluna_ok_perm(perm, c)
     }
 }
 
 # Formato de curl/legado (column.columnName)
 is_campo_valido(perm, r) if {
     has_campo(r)
-    coluna_tecnica(r.campo) or campo_permitido_ci(perm, r.campo)
+    coluna_ok_perm(perm, r.campo)
 }
 
-is_campo_valido(perm, r) if {
-    has_campo(r)
-    campo_permitido_ci(perm, r.campo)
+# "OR" feito do jeito Rego: múltiplas definições da mesma regra
+coluna_ok_perm(perm, c) if {
+    coluna_tecnica(c)
+}
+
+coluna_ok_perm(perm, c) if {
+    not coluna_tecnica(c)
+    campo_permitido_ci(perm, c)
 }
 
 # ==============================================================================
