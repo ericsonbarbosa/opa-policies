@@ -529,17 +529,30 @@ get_indice(rule) := n if {
     n := raw
 }
 
+# --- Tipo da coluna (vem no input do Trino: resource.column.columnType) ---
+col_type := t if {
+    t := lower(trim(object.get(get_column, "columnType", ""), " "))
+}
+
+eh_col_string if { col_type == "" }
+eh_col_string if { startswith(col_type, "varchar") }
+eh_col_string if { startswith(col_type, "char") }
+
+# --- Máscaras de texto (só para colunas string) ---
 columnMask := {"expression": sprintf("to_hex(sha256(to_utf8(%s)))", [req.campo])} if {
+    eh_col_string
     get_funcao(anonymize_rule) == "token-sha256"
 }
 
 columnMask := {"expression": sprintf("regexp_replace(%s, '.', '%s')", [req.campo, get_simbolo(anonymize_rule)])} if {
+    eh_col_string
     get_funcao(anonymize_rule) == "mascarar-por-completo"
 }
 
 columnMask := {"expression": sprintf("concat(rpad('', %d, '%s'), substring(%s, %d))", [
     n, sym, req.campo, n + 1
 ])} if {
+    eh_col_string
     get_funcao(anonymize_rule) == "mascarar-inicio"
     n := get_indice(anonymize_rule)
     sym := get_simbolo(anonymize_rule)
@@ -549,6 +562,7 @@ columnMask := {"expression": sprintf("concat(rpad('', %d, '%s'), substring(%s, %
 columnMask := {"expression": sprintf("concat(substring(%s, 1, greatest(length(%s) - %d, 0)), rpad('', %d, '%s'))", [
     req.campo, req.campo, n, n, sym
 ])} if {
+    eh_col_string
     get_funcao(anonymize_rule) == "mascarar-fim"
     n := get_indice(anonymize_rule)
     sym := get_simbolo(anonymize_rule)
@@ -558,6 +572,7 @@ columnMask := {"expression": sprintf("concat(substring(%s, 1, greatest(length(%s
 columnMask := {"expression": sprintf("CASE WHEN length(%s) > %d THEN concat(rpad('', %d, '%s'), substring(%s, %d, greatest(length(%s) - %d, 0)), rpad('', %d, '%s')) ELSE rpad('', length(%s), '%s') END", [
     req.campo, 2 * n, n, sym, req.campo, n + 1, req.campo, 2 * n, n, sym, req.campo, sym
 ])} if {
+    eh_col_string
     get_funcao(anonymize_rule) == "mascarar-inicio-fim"
     n := get_indice(anonymize_rule)
     sym := get_simbolo(anonymize_rule)
@@ -565,22 +580,32 @@ columnMask := {"expression": sprintf("CASE WHEN length(%s) > %d THEN concat(rpad
 }
 
 columnMask := {"expression": sprintf("substring(%s, 1, %d) || '***'", [req.campo, get_key(anonymize_rule, "indice-regex", 0)])} if {
+    eh_col_string
     get_funcao(anonymize_rule) == "partial-mask"
     is_number(get_key(anonymize_rule, "indice-regex", null))
 }
 
 columnMask := {"expression": sprintf("'%s'", [get_simbolo(anonymize_rule)])} if {
+    eh_col_string
     get_funcao(anonymize_rule) == "symbol-replace"
 }
 
 columnMask := {"expression": sprintf("regexp_replace(%s, '%s', '***')", [req.campo, get_key(anonymize_rule, "indice-regex", "")])} if {
+    eh_col_string
     get_funcao(anonymize_rule) == "regex-mask"
     is_string(get_key(anonymize_rule, "indice-regex", null))
 }
 
 columnMask := {"expression": "'***'"} if {
+    eh_col_string
     has_anonymization
     not get_funcao(anonymize_rule) in ["token-sha256", "mascarar-por-completo", "mascarar-inicio", "mascarar-fim", "mascarar-inicio-fim", "partial-mask", "symbol-replace", "regex-mask"]
+}
+
+# --- Colunas NÃO-string (bigint, integer, date, decimal...): ocultação total, mesmo tipo ---
+columnMask := {"expression": sprintf("CAST(NULL AS %s)", [object.get(get_column, "columnType", "varchar")])} if {
+    not eh_col_string
+    has_anonymization
 }
 
 # ==============================================================================
