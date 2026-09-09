@@ -335,8 +335,7 @@ is_datamart_columns_validos(perm) if {
     tconf := datamart_table_conf(perm)
     cols := get_key(tconf, "columns", {})
     every c in get_columns {
-        cconf := col_conf(cols, c)
-        get_key(cconf, "show", true) == true
+        coluna_tecnica(c) or get_key(col_conf(cols, c), "show", true) == true
     }
 }
 
@@ -371,17 +370,27 @@ campo_permitido_ci(perm, campo_req) if {
     lower(trim(campo_perm, " ")) == lower(trim(campo_req, " "))
 }
 
-is_campo_valido(perm, r) if {
-    not has_campo(r)
-    not has_columns
+# ==============================================================================
+# COLUNAS TÉCNICAS (sem valor de negócio: __hashkey__, $path, $bucket, etc.)
+# São isentas da checagem de campos permitidos.
+# ==============================================================================
+coluna_tecnica(c) if {
+    regex.match(`^(__|\$)`, lower(trim(c, " ")))
 }
 
+# SelectFromColumns real do Trino: valida CADA coluna do array
 is_campo_valido(perm, r) if {
     not has_campo(r)
     has_columns
     every c in get_columns {
-        campo_permitido_ci(perm, c)
+        coluna_tecnica(c) or campo_permitido_ci(perm, c)
     }
+}
+
+# Formato de curl/legado (column.columnName)
+is_campo_valido(perm, r) if {
+    has_campo(r)
+    coluna_tecnica(r.campo) or campo_permitido_ci(perm, r.campo)
 }
 
 is_campo_valido(perm, r) if {
