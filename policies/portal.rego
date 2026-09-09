@@ -653,9 +653,9 @@ parse_and_group(col, grp) := sql if {
 
 parse_cond(col, part) := sql if {
     contains(part, "[")
-    idx := index_of(part, "[")
+    idx := strings.index_of(part, "[")
     val := trim(substring(part, 0, idx), " ")
-    op := trim(substring(part, idx + 1, length(part) - idx - 2), " ")
+    op := trim(substring(part, idx + 1, count(part) - idx - 2), " ")
     sql := sprintf("%s %s %s", [col, op_sql(op), sql_literal(val)])
 }
 
