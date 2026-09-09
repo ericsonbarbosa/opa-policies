@@ -153,9 +153,6 @@ has_table_resource if {
 
 # ==============================================================================
 # CONJUNTO ATIVO/BLOQUEADO
-# ativo=true (ou ausente) = liberado | ativo=false = bloqueado/oculto
-# Encerramento: entrada permanece com ativo=false
-# Reativação: gera duplicata com ativo=true (só esta vigora)
 # ==============================================================================
 perm_ativa(perm) if {
     get_key(perm, "ativo", true) == true
@@ -312,6 +309,53 @@ allow if {
 }
 
 # ==============================================================================
+# DATAMART: Helpers de tabelas físicas (dim_*/fct_*)
+# ==============================================================================
+tabelas_do(perm) := ts if {
+    ts := get_key(perm, "tabelas", {})
+    is_object(ts)
+}
+
+datamart_table_conf(perm) := tconf if {
+    some tname, tconf in tabelas_do(perm)
+    lower(trim(tname, " ")) == lower(trim(req.colecao, " "))
+}
+
+col_conf(cols, name) := cconf if {
+    some k, cconf in cols
+    lower(trim(k, " ")) == lower(trim(name, " "))
+}
+
+is_datamart_table_valido(perm) if {
+    tconf := datamart_table_conf(perm)
+    get_key(tconf, "show", true) == true
+}
+
+is_datamart_columns_validos(perm) if {
+    tconf := datamart_table_conf(perm)
+    cols := get_key(tconf, "columns", {})
+    every c in get_columns {
+        cconf := col_conf(cols, c)
+        get_key(cconf, "show", true) == true
+    }
+}
+
+# ==============================================================================
+# REGRA 2.5 — DATAMART: tabelas físicas via objeto "tabelas"
+# ==============================================================================
+allow if {
+    some perm in perms_for(req.token)
+    perm_ativa(perm)
+    has_table_resource
+    not is_system_target
+    req.colecao != ""
+    datamart_table_conf(perm)
+    is_datamart_table_valido(perm)
+    is_datamart_columns_validos(perm)
+    is_tempo_valido(perm)
+}
+
+# ==============================================================================
 # VALIDAÇÃO DE CAMPO
 # ==============================================================================
 has_campo(r) if {
@@ -384,9 +428,9 @@ valida_match_tipo_query(perm_tq, req_tq) if {
 }
 
 # ==============================================================================
-# ANONIMIZAÇÃO (Column Masking) — só para conjuntos ATIVOS
+# ANONIMIZAÇÃO (Column Masking) — associação + datamart
 # ==============================================================================
-find_anonymization_rules := [rule |
+anon_rules_assoc := [rule |
     some perm in perms_for(req.token)
     perm_ativa(perm)
     colecao_match(perm, req.colecao)
@@ -399,6 +443,27 @@ find_anonymization_rules := [rule |
     trim(funcao_r, " ") != ""
     rule := r
 ]
+
+# DATAMART: chaves em inglês (field/function/symbol/regexIndex)
+anon_rules_datamart := [norm |
+    some perm in perms_for(req.token)
+    perm_ativa(perm)
+    tconf := datamart_table_conf(perm)
+    cols := get_key(tconf, "columns", {})
+    some cname, cconf in cols
+    lower(trim(cname, " ")) == lower(trim(req.campo, " "))
+    a := get_key(cconf, "anonymization", {})
+    fn := trim(get_key(a, "function", ""), " ")
+    fn != ""
+    norm := {
+        "campo": cname,
+        "funcao": fn,
+        "simbolo": get_key(a, "symbol", ""),
+        "indice-regex": get_key(a, "regexIndex", null)
+    }
+]
+
+find_anonymization_rules := array.concat(anon_rules_assoc, anon_rules_datamart)
 
 has_anonymization if {
     count(find_anonymization_rules) > 0
@@ -516,10 +581,51 @@ collection_info := {
 }
 
 # ==============================================================================
-# ROW FILTERS (SQL pronto do Portal) — só para conjuntos ATIVOS
+# ROW FILTERS — associação (row_filter_sql) + datamart (filter por coluna)
 # ==============================================================================
+op_sql("gt") := ">"
+op_sql("lt") := "<"
+op_sql("gte") := ">="
+op_sql("lte") := "<="
+op_sql("eq") := "="
+op_sql("neq") := "<>"
+
+sql_literal(v) := sprintf("'%s'", [v]) if {
+    not regex.match(`^-?[0-9]+(\.[0-9]+)?$`, v)
+}
+
+sql_literal(v) := v if {
+    regex.match(`^-?[0-9]+(\.[0-9]+)?$`, v)
+}
+
+parse_filter_sql(col, expr) := sql if {
+    or_groups := split(expr, "||")
+    gs := [g | some og in or_groups; g := parse_and_group(col, trim(og, " "))]
+    sql := count(gs) == 1 ? gs[0] : sprintf("(%s)", [concat(" OR ", gs)])
+}
+
+parse_and_group(col, grp) := sql if {
+    parts := split(grp, "&&")
+    cs := [c | some p in parts; c := parse_cond(col, trim(p, " "))]
+    sql := count(cs) == 1 ? cs[0] : sprintf("(%s)", [concat(" AND ", cs)])
+}
+
+parse_cond(col, part) := sql if {
+    contains(part, "[")
+    idx := index_of(part, "[")
+    val := trim(substring(part, 0, idx), " ")
+    op := trim(substring(part, idx + 1, length(part) - idx - 2), " ")
+    sql := sprintf("%s %s %s", [col, op_sql(op), sql_literal(val)])
+}
+
+parse_cond(col, part) := sql if {
+    not contains(part, "[")
+    val := trim(part, " ")
+    sql := sprintf("%s = %s", [col, sql_literal(val)])
+}
+
 rowFilters := filters if {
-    filters := [
+    assoc := [
         {"expression": e} |
             some perm in perms_for(req.token)
             perm_ativa(perm)
@@ -527,11 +633,23 @@ rowFilters := filters if {
             e := trim(get_key(perm, "row_filter_sql", ""), " ")
             e != ""
     ]
+    dm := [
+        {"expression": e} |
+            some perm in perms_for(req.token)
+            perm_ativa(perm)
+            tconf := datamart_table_conf(perm)
+            cols := get_key(tconf, "columns", {})
+            some cname, cconf in cols
+            f := trim(get_key(cconf, "filter", ""), " ")
+            f != ""
+            e := parse_filter_sql(cname, f)
+    ]
+    filters := array.concat(assoc, dm)
     count(filters) > 0
 }
 
 # ==============================================================================
-# DENY — silencioso quando o conjunto está bloqueado (ativo=true)
+# DENY — silencioso quando o conjunto está bloqueado (ativo=false)
 # ==============================================================================
 conjunto_silenciado if {
     req.colecao != ""
